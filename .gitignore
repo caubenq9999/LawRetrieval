@@ -37,3 +37,9 @@ Thumbs.db
 
 # rac cua trinh nen macOS trong bundle BTC
 __MACOSX/
+
+# ---- Ngoai pham vi repo (van con tren dia) -----------------------------
+Finetune-LegalIR/
+Scoring-Program-Task-LegalIR/
+Mock-Eval-LegalIR/
+EDA-LegalIR/
