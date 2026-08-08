@@ -78,6 +78,17 @@ def main():
                    help='Lam lai tu dau, ke ca buoc da co san pham')
     p.add_argument('--skip-encode', action='store_true',
                    help='Bo qua dense, chi dung BM25 (nhanh nhung kem ~0.05 Recall)')
+    p.add_argument('--make-expansions', action='store_true',
+                   help='Tao query expansion cache truoc khi predict (LLM local).')
+    p.add_argument('--expansions',
+                   help='File query expansion cache JSON da tao san.')
+    p.add_argument('--expansion-model', default='Qwen/Qwen2.5-1.5B-Instruct',
+                   help='LLM open-source nho dung cho expand_queries.py')
+    p.add_argument('--rules-only-expansion', action='store_true',
+                   help='Tao expansion bang rule fallback, khong nap LLM.')
+    p.add_argument('--bm25-expand-mode', default='max',
+                   choices=['off', 'expanded', 'max', 'interpolate'])
+    p.add_argument('--expand-weight', type=float, default=0.3)
     args = p.parse_args()
 
     data = os.path.abspath(args.data)
@@ -90,6 +101,9 @@ def main():
     chunks = os.path.join(CHUNK_DIR, 'chunks.jsonl')
     index = os.path.join(RETR_DIR, 'index')
     emb = os.path.join(RETR_DIR, 'emb')
+    expansions = args.expansions
+    if expansions:
+        expansions = os.path.abspath(expansions)
 
     print(f'Du lieu   : {data}')
     print(f'Corpus    : {ctx}')
@@ -119,20 +133,35 @@ def main():
         else:
             print(f'[bo qua buoc 3] da co {emb}')
 
-    # --- 4. sinh bai nop --------------------------------------------------
+    # --- 4. query expansion (tuy chon) -----------------------------------
+    if args.make_expansions:
+        if expansions is None:
+            expansions = os.path.join(RETR_DIR, f'{args.out}_expansions.json')
+        cmd_exp = ['expand_queries.py', '--questions', questions,
+                   '--out', expansions, '--resume',
+                   '--model', args.expansion_model]
+        if args.rules_only_expansion:
+            cmd_exp.append('--rules-only')
+        run(cmd_exp, RETR_DIR, 'BUOC 4/6 - Tao query expansion cache')
+
+    # --- 5. sinh bai nop --------------------------------------------------
     cmd = ['predict.py', '--index', 'index', '--questions', questions,
            '--k1', str(args.k1), '--b', str(args.b), '--out', args.out]
     if use_dense:
         cmd += ['--emb', 'emb', '--alpha', str(args.alpha), '--pool', str(args.pool)]
+    if expansions:
+        cmd += ['--expansions', expansions,
+                '--bm25-expand-mode', args.bm25_expand_mode,
+                '--expand-weight', str(args.expand_weight)]
     if os.path.exists(train):
         cmd += ['--train', train]
-    run(cmd, RETR_DIR, 'BUOC 4/5 - Sinh bai nop (~1-2 phut)')
+    run(cmd, RETR_DIR, 'BUOC 5/6 - Sinh bai nop (~1-2 phut)')
 
-    # --- 5. kiem tra ------------------------------------------------------
+    # --- 6. kiem tra ------------------------------------------------------
     zip_path = os.path.join(RETR_DIR, f'{args.out}.zip')
     run([os.path.join(VALID_DIR, 'validate_submission.py'), zip_path,
          '--ref', questions, '--corpus', ctx],
-        RETR_DIR, 'BUOC 5/5 - Kiem tra bai nop')
+        RETR_DIR, 'BUOC 6/6 - Kiem tra bai nop')
 
     print(f'\n{"=" * 70}')
     print(f'XONG. Bai nop: {zip_path}')

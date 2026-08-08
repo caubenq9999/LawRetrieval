@@ -23,6 +23,7 @@ import zipfile
 import numpy as np
 
 from bm25 import BM25Index
+from query_expansion import load_expansions
 
 TOPK = 5
 
@@ -40,6 +41,13 @@ def main():
     p.add_argument('--fusion', default='linear', choices=['linear', 'rrf'])
     p.add_argument('--alpha', type=float, default=0.7, help='Trong so DENSE (con lai la BM25)')
     p.add_argument('--pool', type=int, default=1000)
+    p.add_argument('--expansions',
+                   help='JSON cache from expand_queries.py. Used for BM25 only.')
+    p.add_argument('--bm25-expand-mode', default='max',
+                   choices=['off', 'expanded', 'max', 'interpolate'],
+                   help='How to combine original and expanded BM25 scores.')
+    p.add_argument('--expand-weight', type=float, default=0.3,
+                   help='Weight for --bm25-expand-mode interpolate.')
     p.add_argument('--rerank', help='Model cross-encoder -> bat tang 3')
     p.add_argument('--beta', type=float, default=0.6,
                    help='Trong so cross-encoder khi tron voi diem hybrid (1.0 = thay the han)')
@@ -49,6 +57,7 @@ def main():
 
     with open(args.questions, encoding='utf-8-sig') as f:
         questions = json.load(f)
+    expansions = load_expansions(args.expansions)
 
     # Nguon do: van ban hay la dap an nhat trong train. Chi dung khi BM25 tra ve
     # duoi 5 ket qua - tha doan bua con hon bo trong o, vi Recall khong phat.
@@ -78,6 +87,8 @@ def main():
         print('Che do : BM25 thuan')
     print(f'Index  : {idx.meta["n_chunks"]:,} chunk | k1={args.k1} b={args.b} agg={args.agg}')
     print(f'De bai : {len(questions)} cau hoi')
+    if expansions:
+        print(f'Expand : {len(expansions)} cau | BM25 mode={args.bm25_expand_mode}')
 
     qids = list(questions.keys())
     texts = [questions[q]['question'] for q in qids]
@@ -97,15 +108,28 @@ def main():
             ranked = rerank_docs(hyb, rr, questions[qid]['question'], topk=TOPK,
                                  pool=args.pool, alpha=args.alpha, agg=args.agg,
                                  n_docs=args.ndocs, m_chunks=args.mchunks,
-                                 qvec=qvecs[i - 1], beta=args.beta)
+                                 qvec=qvecs[i - 1], beta=args.beta,
+                                 expansion=expansions.get(qid),
+                                 bm25_expand_mode=args.bm25_expand_mode,
+                                 expand_weight=args.expand_weight)
             preds = [d for d, _, _, _ in ranked]
         elif hyb is not None:
             ranked = hyb.search_docs(questions[qid]['question'], topk=TOPK, pool=args.pool,
                                      fusion=args.fusion, alpha=args.alpha, agg=args.agg,
-                                     qvec=qvecs[i - 1])
+                                     qvec=qvecs[i - 1],
+                                     expansion=expansions.get(qid),
+                                     bm25_expand_mode=args.bm25_expand_mode,
+                                     expand_weight=args.expand_weight)
             preds = [d for d, _, _, _ in ranked]
         else:
-            scores, _ = idx.score(questions[qid]['question'])
+            if expansions:
+                from hybrid import combine_bm25_scores
+                scores, _ = combine_bm25_scores(idx, questions[qid]['question'],
+                                                expansions.get(qid),
+                                                args.bm25_expand_mode,
+                                                args.expand_weight)
+            else:
+                scores, _ = idx.score(questions[qid]['question'])
             preds = [d for d, _, _, _ in idx.rank_docs(scores, topk=TOPK, agg=args.agg)]
         if len(preds) < TOPK:
             n_padded += 1

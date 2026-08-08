@@ -32,6 +32,7 @@ import torch
 from transformers import AutoModel, AutoTokenizer
 
 from bm25 import BM25Index
+from query_expansion import build_expanded_query
 
 MODEL_ID = 'hiieu/halong_embedding'
 RRF_K = 60
@@ -40,6 +41,29 @@ RRF_K = 60
 def minmax(x):
     lo, hi = float(x.min()), float(x.max())
     return np.zeros_like(x) if hi - lo < 1e-9 else (x - lo) / (hi - lo)
+
+
+def combine_bm25_scores(idx, query, expansion=None, mode='max', weight=0.3):
+    """Score BM25 with optional query expansion.
+
+    mode:
+      off         - original query only
+      expanded    - expanded query only
+      max         - elementwise max(original, expanded), safest default
+      interpolate - (1-weight) * original + weight * expanded
+    """
+    sc0, hits0 = idx.score(query)
+    if not expansion or mode == 'off':
+        return sc0, hits0
+    expanded_query = build_expanded_query(query, expansion)
+    if expanded_query == query:
+        return sc0, hits0
+    sc1, hits1 = idx.score(expanded_query)
+    if mode == 'expanded':
+        return sc1, hits1
+    if mode == 'interpolate':
+        return (1 - weight) * sc0 + weight * sc1, hits0 + hits1
+    return np.maximum(sc0, sc1), hits0 + hits1
 
 
 class Hybrid:
@@ -69,12 +93,14 @@ class Hybrid:
             v = torch.nn.functional.normalize(v.float(), p=2, dim=1)
         return v.cpu().numpy()
 
-    def fused_chunk_scores(self, query, pool=1000, fusion='rrf', alpha=0.5, qvec=None):
+    def fused_chunk_scores(self, query, pool=1000, fusion='rrf', alpha=0.5, qvec=None,
+                           expansion=None, bm25_expand_mode='max', expand_weight=0.3):
         """Tra ve (chunk_idx, diem_hoa) cho cac chunk trong pool.
 
         qvec: vector cau hoi tinh san (dung khi chay lo, khoi encode lai tung cau).
         """
-        sc, _ = self.bm25.score(query)
+        sc, _ = combine_bm25_scores(self.bm25, query, expansion, bm25_expand_mode,
+                                    expand_weight)
         nz = np.flatnonzero(sc)
         if nz.size == 0:
             return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float32)
@@ -104,8 +130,10 @@ class Hybrid:
         return order, (1.0 / (RRF_K + 1 + r_bm) + 1.0 / (RRF_K + 1 + r_dn)).astype(np.float32)
 
     def search_docs(self, query, topk=5, pool=1000, fusion='rrf', alpha=0.5, agg='top3',
-                    qvec=None):
-        order, fused = self.fused_chunk_scores(query, pool, fusion, alpha, qvec)
+                    qvec=None, expansion=None, bm25_expand_mode='max', expand_weight=0.3):
+        order, fused = self.fused_chunk_scores(query, pool, fusion, alpha, qvec,
+                                               expansion, bm25_expand_mode,
+                                               expand_weight)
         if order.size == 0:
             return []
         rank = np.argsort(-fused)

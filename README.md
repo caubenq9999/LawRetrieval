@@ -50,6 +50,51 @@ python run_all.py --data "..." --skip-encode                  # chỉ BM25
 python run_all.py --data "..." --force                        # làm lại từ đầu
 ```
 
+### Query expansion bằng LLM nhỏ (tuỳ chọn)
+
+Mục tiêu: chỉ mở rộng câu hỏi cho **BM25**; dense `halong_embedding` vẫn dùng câu hỏi gốc
+để tránh vector bị loãng vì nhồi từ khoá.
+
+Model khuyến nghị để thử: `Qwen/Qwen2.5-1.5B-Instruct` — Apache-2.0, khoảng 1.54B tham số,
+đa ngôn ngữ có tiếng Việt. Vẫn cần đăng ký model với BTC trước khi dùng cho submission chính
+thức.
+
+```bash
+# tạo cache expansion bằng LLM local
+cd Retrieval-LegalIR
+python expand_queries.py \
+  --questions "../LegalIR - Public Test/public-official.json" \
+  --out public_expansions.json \
+  --model Qwen/Qwen2.5-1.5B-Instruct \
+  --resume
+
+# chạy predict với BM25 = max(BM25 gốc, BM25 query mở rộng), dense giữ query gốc
+python predict.py \
+  --index index \
+  --questions "../LegalIR - Public Test/public-official.json" \
+  --emb emb \
+  --expansions public_expansions.json \
+  --bm25-expand-mode max \
+  --out submission_expand
+```
+
+Chạy qua `run_all.py`:
+
+```bash
+python run_all.py --data "LegalIR - Public Test" \
+  --make-expansions \
+  --expansion-model Qwen/Qwen2.5-1.5B-Instruct \
+  --bm25-expand-mode max
+```
+
+Để ablation nhanh không cần LLM:
+
+```bash
+python run_all.py --data "LegalIR - Public Test" \
+  --make-expansions --rules-only-expansion \
+  --bm25-expand-mode max
+```
+
 ---
 
 ## Pipeline
