@@ -69,13 +69,15 @@ class Reranker:
 
 
 def rerank_docs(h, rr, query, topk=5, pool=1000, alpha=0.7, agg='top3',
-                n_docs=20, m_chunks=3, qvec=None, beta=1.0):
+                n_docs=20, m_chunks=3, qvec=None, beta=1.0, expansion=None,
+                bm25_expand_mode='max', expand_weight=0.3):
     """Hybrid lay ung vien -> cross-encoder cham lai -> top-k van ban.
 
     beta: trong so cua cross-encoder khi tron voi diem hybrid.
           1.0 = thay the han bang cross-encoder, 0.0 = giu nguyen hybrid.
     """
-    order, fused = h.fused_chunk_scores(query, pool, 'linear', alpha, qvec)
+    order, fused = h.fused_chunk_scores(query, pool, 'linear', alpha, qvec,
+                                        expansion, bm25_expand_mode, expand_weight)
     if order.size == 0:
         return []
 
