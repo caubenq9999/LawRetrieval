@@ -185,9 +185,22 @@ class BM25Index:
         return scores, hit_terms
 
     def read_chunk(self, idx):
-        with open(self.meta['chunks_path'], 'rb') as f:
-            f.seek(int(self.line_offsets[idx]))
-            return json.loads(f.readline())
+        # Giu san file handle thay vi mo lai moi lan. Truoc day ham nay mo lai file
+        # chunks.jsonl (592 MB) cho TUNG chunk - mot lan sinh bai nop goi 100.000 lan,
+        # khien GPU phai cho dia thay vi chay het cong suat.
+        f = getattr(self, '_chunks_fh', None)
+        if f is None:
+            f = self._chunks_fh = open(self.meta['chunks_path'], 'rb')
+        f.seek(int(self.line_offsets[idx]))
+        return json.loads(f.readline())
+
+    def __del__(self):
+        f = getattr(self, '_chunks_fh', None)
+        if f is not None:
+            try:
+                f.close()
+            except Exception:
+                pass
 
     def search(self, query, topk=10):
         scores, hit_terms = self.score(query)

@@ -234,12 +234,10 @@ buộc là chuỗi. Sai chỗ này thì chương trình chấm cho **0 điểm m
 | Văn bản rỗng | 20 văn bản, **6 là gold** | cần fallback tầng 0 |
 | Thiếu `name` | 1.125/8.532 văn bản | phải dùng `.get()`, không `d["name"]` |
 | Lệch popularity | 36,4% corpus từng là đáp án; `245154` xuất hiện 109 lần | 5.427 văn bản chưa từng là đáp án chính là nơi chứa đáp án public/private — đừng prune |
-| Viết tắt | `cccd` hiếm → idf cao → lái sang văn bản sai | cần từ điển viết tắt phía query |
+| Viết tắt | 44/1000 câu có viết tắt, Recall 0.9091 vs 0.8998 câu thường | không phải vấn đề — đã đo |
 
-```
-'lệ phí làm cccd là bao nhiêu'   →  #1 doc 20457  (sai)
-'lệ phí làm căn cước công dân'   →  #1 doc 165290 (đúng)
-```
+Văn bản pháp luật tự định nghĩa viết tắt ngay Điều 1 rồi dùng cả hai dạng, nên chunk chứa
+cả hai. Mở rộng viết tắt hoặc đồng nghĩa **không đáng làm**: trần của nó chỉ là +0.0040.
 
 ---
 

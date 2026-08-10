@@ -1,185 +1,163 @@
-# DSC 2026 — Task 1: Legal Information Retrieval — Kết quả
+# DSC 2026 — Task 1: LegalIR — Kết quả
 
-Ghi lại toàn bộ số liệu đã đo, kèm cỡ mẫu và điều kiện đo. Mọi con số trong tài liệu này
-đều từ lần chạy thật, không phải ước lượng — trừ chỗ ghi rõ là ước lượng.
+Số liệu từ lần chạy thật, kèm cỡ mẫu và điều kiện đo. Chỗ nào là ước lượng đều ghi rõ.
 
-Cập nhật: 2026-08-07
-
----
-
-## 1. Kết quả chính
-
-| Chỉ số | Giá trị | Đo trên |
-|---|---|---|
-| **Recall@5** | **0.8233** | 300 câu train, chấm bằng `scoring.py` của BTC |
-| Precision@5 | 0.1740 | như trên |
-| Bài nộp | `Retrieval-LegalIR/submission.zip` | 1.000 câu public test, validator pass |
-
-Recall là độ đo chính; Precision chỉ dùng phá hoà. Precision thấp là **cố ý**: trả đủ 5 ID
-cho câu thường chỉ có 1 đáp án thì trần Precision là 0.20. Trả 1 ID thì Precision ~1.0
-nhưng Recall tụt còn ~0.51.
-
-> `0.8233` đo trên câu **lấy từ train**, không phải điểm public test. Đáp án public nằm ở
-> phía BTC (`answer: null` trong đề bài) nên không thể chấm ở local.
+Cập nhật: 2026-08-08
 
 ---
 
-## 2. Pipeline
+## 1. Điểm public leaderboard
+
+| # | Cấu hình | Public | Delta | Validation | Lệch |
+|---|---|---|---|---|---|
+| 1 | BM25 + dense zero-shot, pool 1000, α=0.7, top3 | **0.8637** | — | 0.8633 | +0.000 |
+| 2 | + fine-tune bi-encoder | **0.8855** | +0.0218 | 0.8927 | −0.007 |
+| 3 | + pool 2000, top2 mean | **0.8897** | +0.0042 | 0.9002 | −0.011 |
+| 4 | + cross-encoder β=0.5, ndocs=50, mchunks=2 | **0.9005** | +0.0108 | 0.9192 | −0.019 |
+
+Top-1 leaderboard: 0.94.
+
+### Validation đang lạc quan dần
+
+Cột "Lệch" là điều đáng chú ý nhất bảng. Ban đầu validation khớp public gần như tuyệt đối
+(+0.0004), giờ đã lệch −0.019. Nguyên nhân: **cùng một tập 1.000 câu bị dùng để chọn tham
+số nhiều lần**, mỗi lần chọn lại làm nó lạc quan thêm.
+
+Từ giờ ước public = validation − 0.02, đừng lấy nguyên.
+
+---
+
+## 2. Pipeline hiện tại
 
 ```
-context_*.json  ──chunk 3 tầng──►  487.194 chunk
-                                        │
-                                   BM25 (k1=3.0, b=0.75)
-                                        │
-                                   điểm từng chunk
-                                        │
-                                   gộp top-3 mean ──►  điểm document
-                                        │
-                                   top-5 document
+8.532 văn bản → chunker 3 tầng → 487.194 chunk
+        │
+   BM25 (k1=2.5, b=0.9) → pool 2.000 chunk
+        │
+   + dense fine-tune, hoà linear α=0.7 (70% dense / 30% BM25)
+        │
+   → 50 văn bản × 2 chunk = 100 ứng viên
+        │
+   + cross-encoder AITeamVN/Vietnamese_Reranker, trộn β=0.5
+        │
+   → gộp top-2 mean → top-5 văn bản
 ```
 
-### 2.1 Chunking — 3 tầng
+Thời gian sinh bài nộp: **25 phút** (cross-encoder chiếm gần hết).
 
-| Tầng | Điều kiện | Số chunk |
-|---|---|---|
-| 1 | cắt theo `Điều N` | 122.520 |
-| 2 | Điều > 350 từ → cắt theo `Khoản`; vẫn dài → cửa sổ cố định | 333.416 |
-| 3 | văn bản không có `Điều` (công văn, TCVN) → cửa sổ 256 từ, overlap 25% | 31.238 |
-| 0 | `passage` rỗng → vớt tiêu đề từ slug trong `link` | 20 |
+---
+
+## 3. Từng thành phần đóng góp bao nhiêu
+
+### 3.1 Chunking 3 tầng
 
 ```
 8.532 văn bản → 487.194 chunk    1m31s, 592 MB
-độ dài: median 165 từ · p90 266 · p99 336 · max 407   (từ max gốc 1.242.409)
-chunk/văn bản: median 33 · p90 126 · max 6.514
+median 165 từ · p99 336 · max 407   (từ max gốc 1.242.409)
+0/8.532 văn bản bị mất · 0/3.105 đáp án gold thiếu chunk
 ```
 
-Đối chiếu toàn vẹn: **0/8.532 văn bản bị mất**, **0/3.105 đáp án gold thiếu chunk**.
-
-Mỗi chunk được prepend header `tên văn bản > Điều > Khoản`. Tiêu đề Điều được nhân bản
-vào mọi mảnh con, nếu không mảnh thứ 2 trở đi mất hết ngữ cảnh.
-
-### 2.2 BM25
-
-Inverted index trên đĩa qua `np.memmap` (RAM máy chỉ còn ~0.5 GB nên không dùng sparse
-matrix trong bộ nhớ được). Build 2 lượt: lượt 1 đếm df để biết offset, lượt 2 ghi postings.
-
-```
-từ điển 69.920 · 48.339.443 postings · index 299 MB · build 202s · query 85ms
-```
-
-### 2.3 Gộp chunk → document
-
-Đo trên 200 câu train, `k1=3.0 b=0.75`:
-
-| Cách gộp | Recall@5 |
-|---|---|
-| **top3** (trung bình 3 chunk cao nhất) | **0.8250** |
-| max | 0.7950 |
-| avg toàn bộ chunk | 0.4175 |
-| top3_log (chia log số chunk) | 0.1706 |
-
-`avg` toàn bộ hỏng vì văn bản `68843` có 6.514 chunk — một câu hỏi chỉ khớp 2–3 chunk,
-6.511 chunk còn lại điểm 0 kéo trung bình về sát 0. Càng dài càng bị dìm.
-
----
-
-## 3. Tinh chỉnh BM25
-
-Quét lưới `k1`/`b` trên 200 câu (đổi tham số không cần build lại index — postings lưu tf thô):
-
-```
-k1 \ b     0.4      0.6     0.75      0.9
-0.6     0.7788   0.7788   0.7963   0.8013
-0.9     0.7887   0.8187   0.8263   0.8263
-1.2     0.8029   0.8237   0.8363   0.8363
-1.5     0.8079   0.8279   0.8379   0.8454
-2.0     0.8087   0.8379   0.8479   0.8479
-3.0        —        —    0.8579*     —
-```
-
-Kiểm chứng trên 500 câu **seed khác** để loại overfit vào lưới quét:
-
-| Cấu hình | Recall@5 | Hit@5 | MRR@20 |
-|---|---|---|---|
-| mặc định k1=1.5 b=0.75 | 0.8220 | 0.8420 | 0.6456 |
-| tune k1=3.0 b=0.75 | 0.8290 | 0.8480 | 0.6585 |
-
-Mức tăng tụt từ **+0.020 xuống +0.007** — phần lớn ở lưới quét là nhiễu mẫu. Tune BM25
-coi như đã cạn.
-
-**Hai giả thuyết ban đầu bị dữ liệu bác bỏ:**
-
-- `top3_log`: phạt văn bản nhiều chunk → 0.1706, tệ hơn `max` 5 lần. BM25 đã chuẩn hoá độ
-  dài ở mức chunk rồi, phạt thêm ở mức document chỉ làm hỏng.
-- `k1` thấp: tưởng làm từ lặp bão hoà nhanh sẽ triệt tiêu lợi thế "nhồi từ khoá" của văn
-  bản dài. Thực tế ngược — `k1=0.6` → 0.796, `k1=3.0` → 0.858. Tần suất lặp là tín hiệu
-  chủ đề, không phải nhiễu.
-
----
-
-## 4. Phân bố thứ hạng và trần recall
-
-300 câu train, gộp `top3`:
-
-```
-hạng 1      : 51.0%        hạng 6-10   :  5.7%
-hạng 2-3    : 23.3%        hạng 11-20  :  6.0%
-hạng 4-5    :  9.3%        ngoài top20 :  4.7%
-```
-
-Trần recall của pool BM25 (300 câu):
-
-| Pool (chunk) | Gold nằm trong pool | Số văn bản riêng |
+| Tầng | Điều kiện | Chunk |
 |---|---|---|
-| 200 | 0.9767 | 70 |
-| 1.000 | 0.9900 | 304 |
-| 2.000 | 0.9967 | 563 |
-| 10.000 | 0.9967 | 2.142 |
+| 1 | cắt theo `Điều N` | 122.520 |
+| 2 | Điều > 350 từ → `Khoản` → cửa sổ cố định | 333.416 |
+| 3 | không có `Điều` → cửa sổ 256 từ, overlap 25% | 31.238 |
+| 0 | `passage` rỗng → tiêu đề từ slug `link` | 20 |
 
-**Đây là con số quyết định kiến trúc.** Ở mức document 4.7% gold rớt ngoài top-20, nhưng ở
-mức chunk pool 1.000 đã chứa 99.0% gold. Cùng một văn bản có thể đứng hạng 50 ở mức doc
-nhưng vẫn có chunk lọt top-1.000. Tức **BM25 tìm ra rồi, chỉ xếp sai chỗ** — vấn đề là
-ranking chứ không phải recall.
+### 3.2 Gộp chunk → document
 
-Dư địa còn lại: **+0.168** (0.829 → 0.9967), lấy được bằng rerank, không cần tìm thêm.
+Đo 2 lần, kết luận đổi sau khi có fine-tune:
+
+| Cách gộp | BM25 thuần (200 câu) | Sau fine-tune (1.000 câu) |
+|---|---|---|
+| max | 0.7950 | 0.8785 |
+| top2 mean | — | **0.9002** |
+| top3 mean | **0.8250** | 0.8952 |
+| top5 mean | — | 0.8762 |
+| top3 / log(số chunk) | 0.1706 | — |
+
+`top3` đúng cho BM25 thuần nhưng **sai sau khi có dense** — chunk đúng nổi bật hơn nên gộp
+3 là pha loãng. `top2` thắng ở cả 24/24 ô lưới pool × α.
+
+`avg` toàn bộ hỏng vì văn bản `68843` có 6.514 chunk: một câu chỉ khớp 2–3 chunk, phần còn
+lại điểm 0 kéo trung bình về sát 0.
+
+### 3.3 Fine-tune bi-encoder
+
+5.999 cặp đào từ 6.000 câu train (1.000 câu để validation, không huấn luyện).
+
+- **Positive**: chunk điểm hybrid cao nhất trong văn bản gold (giám sát yếu — nhãn ở mức
+  document, model học ở mức chunk)
+- **Negative**: chunk thuộc văn bản không phải gold, hạng 5–80. Bỏ 5 hạng đầu vì corpus có
+  5.427 văn bản chưa từng là đáp án, rất dễ là false negative
+- Loss: `CachedMultipleNegativesRankingLoss` (GradCache) trong `MatryoshkaLoss`
+- 93 bước, 11.4 phút, VRAM đỉnh 5.58/6.4 GB, loss 5.12 → 3.34
+
+| α | gốc | fine-tune | delta |
+|---|---|---|---|
+| 0.0 (BM25 thuần) | 0.8112 | 0.8112 | +0.0000 |
+| 0.7 | 0.8633 | **0.8927** | +0.0293 |
+| 1.0 (dense thuần) | 0.8307 | 0.8780 | +0.0473 |
+
+`α=0.0` cho delta đúng bằng 0 — phép kiểm tra tự thân, xác nhận không có rò rỉ trong đường đo.
+
+Dense thuần +0.047 nhưng hybrid chỉ +0.029: một phần thứ model học được là thứ BM25 vốn đã
+biết. α tối ưu **không dịch** (0.8 → 0.7, coi như hoà) — dự đoán của tôi rằng nó sẽ nhảy lên
+0.8–0.9 là sai.
+
+### 3.4 Cross-encoder
+
+| ndocs | mchunks | β | nửa đầu | nửa sau | cả 1000 | delta |
+|---|---|---|---|---|---|---|
+| 20 | 2 | 0.0 | 0.9057 | 0.8947 | 0.9002 | — |
+| 20 | 3 | 0.5 | 0.9243 | 0.9083 | 0.9163 | +0.0162 |
+| **50** | **2** | **0.5** | 0.9200 | **0.9183** | 0.9192 | **+0.0190** |
+| 50 | 3 | 0.5 | 0.9233 | 0.9153 | 0.9193 | +0.0192 |
+| 50 | 2 | 1.0 | 0.8420 | 0.8503 | 0.8462 | −0.0540 |
+
+Bootstrap 95% CI: **[+0.0033, +0.0290]**, thắng 99.4% — tham số duy nhất trong dự án có
+khoảng tin cậy không chứa 0.
+
+**Lần thử đầu tôi kết luận sai** ("reranker vô dụng") vì hai lỗi cộng lại:
+- `β=1.0` — để cross-encoder **đè** thay vì **trộn**. β=1.0 luôn tệ (−0.023 đến −0.054)
+- `ndocs=20` khi trần lúc đó mới 0.9177, gần sát mức đã đạt → +0.03 bị triệt tiêu bởi −0.02
+
+Sau fine-tune, trần `ndocs=20` lên 0.9603 và `ndocs=50` lên 0.9782, nên reranker mới có đất.
 
 ---
 
-## 5. Dense — đang chạy
+## 4. Trần hệ thống
 
-Model `hiieu/halong_embedding`: xlm-roberta base, 278M tham số, 768 chiều.
+Recall ở mức văn bản, pipeline hiện tại (1.000 câu validation):
 
-Ba thuộc tính đọc từ config, không đoán:
+| top-N | Recall@N | |
+|---|---|---|
+| 10 | 0.9347 | |
+| 20 | 0.9603 | |
+| 50 | 0.9782 | ← ndocs đang dùng |
+| 120 | 0.9843 | |
 
-- **mean pooling** (`pooling_mode_mean_tokens: true`, cls `false`)
-- **L2 normalize** sẵn → dot product = cosine
-- **không cần prefix** `query:`/`passage:` (`prompts: {}`; README encode query và doc y hệt).
-  Chỗ này dễ sai vì kiến trúc giống multilingual-e5 vốn *bắt buộc* có prefix.
-- train bằng `MatryoshkaLoss` → cắt 768→256 rồi normalize lại vẫn dùng được, không cần
-  encode lại (chỉ là slice cột).
+Thực tế đạt 0.9192. Dư địa còn **+0.059** chỉ bằng xếp hạng lại, không cần tìm thêm.
 
-Benchmark trên 8.192 chunk (RTX 3050 6GB):
+---
 
-```
-226 chunk/s  →  487.194 chunk ≈ 36 phút
-độ dài token: median 209 · p90 389 · p99 507 · max 512
-bị cắt ở 512 token: 1.0%
-vector: 487.194 × 768 fp16 = 714 MB trên đĩa
-```
+## 5. Bài học đo đạc
 
-Chunking 350 từ khớp đẹp với giới hạn 512 token của model — chỉ 1% mất mát.
+Ở cỡ mẫu 200–500 câu, **chênh lệch dưới ~0.01 không đọc được**. Đã bốn lần suýt chốt nhầm:
 
-### Kiến trúc hybrid
+| Tham số | Bẫy | Cách phát hiện |
+|---|---|---|
+| `α=0.8` | đỉnh 0.9061 seed 777 → 0.8445 seed 2024 | đo lại seed khác |
+| `k1/b` | 3 lần đo cho 3 kết quả khác nhau | 2.000 câu + bootstrap → CI chứa 0 |
+| `top3_log` | lý thuyết hợp lý, thực tế 0.1706 | cứ đo |
+| cấu hình B | +0.0075, CI [−0.001, +0.016] | bootstrap → chấp nhận có rủi ro |
 
-Dense đóng vai **reranker**, không phải retriever — hệ quả trực tiếp của trần pool ở mục 4.
-BM25 lấy pool 1.000 chunk → đọc vector từ memmap (~3 MB/query) → cosine → hoà điểm → gộp
-`top3` về document.
-
-Nhờ vậy không cần faiss và không phải nạp 714 MB vector vào RAM.
-
-Sẽ so 6 cấu hình: `bm25` thuần, `dense` thuần, `rrf`, `linear` ở alpha 0.3/0.5/0.7.
-
-**Chưa có kết quả.** Trần +0.168 là dư địa, không phải mức tăng sẽ đạt.
+Quy trình đã chốt:
+1. Quét lưới trên nửa đầu tập validation
+2. **Kiểm chứng trên nửa sau** — chưa từng nhìn lúc chọn
+3. Bootstrap trên hiệu số **từng câu**, xem CI có chứa 0 không
+4. Chỉ tin **delta**, không tin giá trị tuyệt đối
+5. Bằng chứng từ public test thắng mọi phép đo trên train
 
 ---
 
@@ -187,70 +165,56 @@ Sẽ so 6 cấu hình: `bm25` thuần, `dense` thuần, `rrf`, `linear` ở alph
 
 | Phát hiện | Con số | Hệ quả |
 |---|---|---|
-| Văn bản khổng lồ | median 4.813 từ, max 1.242.409, **99.6% vượt 512 token** | bắt buộc chunk |
-| Tín hiệu lexical loãng | từ khoá câu hỏi có trong văn bản đúng 0.944, trong văn bản **ngẫu nhiên** 0.683 | BM25 trên nguyên văn bản sẽ hỏng; chunk là để khôi phục tín hiệu phân biệt |
-| Văn bản rỗng | 20 văn bản `passage` rỗng, **6 là gold trong train** | cần fallback tầng 0 |
-| Thiếu `name` | 1.125/8.532 văn bản | `d["name"]` sẽ `KeyError`, phải `.get()` |
-| Lệch popularity | chỉ 36.4% corpus từng là đáp án; `245154` là đáp án 109 lần | 5.427 văn bản chưa từng xuất hiện trong train là nơi chứa đáp án public/private — đừng prune |
-| Cấu trúc pháp lý | 85.9% có `Điều N`, 95.8% có `Khoản` | chunk theo cấu trúc khả thi |
-| Viết tắt | `cccd` có trong từ điển nhưng hiếm → idf cao → kéo kết quả sang văn bản sai | cần từ điển viết tắt ở phía query |
+| Văn bản khổng lồ | median 4.813 từ, max 1.242.409, 99.6% vượt 512 token | bắt buộc chunk |
+| Tín hiệu lexical loãng | 0.944 (văn bản đúng) vs 0.683 (ngẫu nhiên) | BM25 trên nguyên văn bản sẽ hỏng |
+| Văn bản rỗng | 20 văn bản, **6 là gold** | cần fallback tầng 0 |
+| Thiếu `name` | 1.125/8.532 | phải `.get()` |
+| Lệch popularity | 36.4% corpus từng là đáp án; `245154` xuất hiện 109 lần | đừng prune 5.427 văn bản còn lại |
+| Viết tắt | 44/1000 câu có viết tắt, Recall 0.9091 vs 0.8998 câu thường | **không phải vấn đề — đã đo, xem 6.1** |
 
-Ví dụ ca viết tắt:
+### 6.1 Viết tắt: giả thuyết bị bác bỏ
 
-```
-'lệ phí làm cccd là bao nhiêu'   →  #1 doc 20457 (sai), #2 doc 20457, #4 doc 20457
-'lệ phí làm căn cước công dân'   →  #1 doc 165290 (GOLD)
-```
+Tôi từng ghi `cccd` như bằng chứng rằng viết tắt lái kết quả sai. Kiểm lại: **`CCCD`
+xuất hiện 0/1.000 câu public và 1/7.000 câu train** — ví dụ đó là câu tôi tự gõ, không
+phải dữ liệu thật.
+
+Đo trên 1.000 câu validation:
+
+| | Số câu | Recall@5 |
+|---|---|---|
+| Có viết tắt | 44 | 0.9091 |
+| Không viết tắt | 956 | 0.8998 |
+
+Câu có viết tắt chạy **tốt hơn**. Ngay cả khi sửa toàn bộ 44 câu lên 100% thì tổng chỉ
+tăng **+0.0040**.
+
+Nguyên nhân: văn bản pháp luật tự định nghĩa viết tắt ngay Điều 1 rồi dùng cả hai dạng,
+nên chunk chứa cả hai. Câu hỏi cũng thường có cả hai (*"bảo hiểm y tế (BHYT)"*). Và viết
+tắt hiếm (`UKVFTA` df 69, `RCEP` df 53) là **tín hiệu mạnh** — mở rộng sẽ làm loãng.
+
+Cùng lý do đó, **mở rộng đồng nghĩa bằng LLM cũng không đáng làm**: đo trần pool cho thấy
+BM25 chỉ để lọt 0.79% gold ở pool 2000, và bổ sung dense global toàn cục chỉ vớt thêm
++0.0012. Nút thắt là xếp hạng, không phải tìm kiếm.
 
 ---
 
-## 7. Hạ tầng
+## 7. Nợ kỹ thuật
 
-### `Validator-Task-LegalIR/`
-Validator local cho bài nộp: 14 mã lỗi + 5 cảnh báo, gom hết lỗi rồi in một lần.
-Bắt được cả `question_id` trùng lặp — thứ `json.load` mặc định nuốt mất.
-
-### `Mock-Eval-LegalIR/`
-Chạy **nguyên văn** `scoring.py` của BTC ở local: đọc file rồi `exec` trong namespace riêng
-với `__name__ = 'btc_scoring'`, ghi đè 3 biến `reference_dir`/`prediction_dir`/`score_dir`.
-Không sửa một ký tự nào trong file của BTC.
-
-Phát hiện về `scoring.py`:
-
-- **crash** với `answer: null`, thiếu key `answer`, sai question_id (`TypeError`/`KeyError`
-  trần, không có thông điệp)
-- **0 điểm âm thầm** khi `document_id` là `int` — `context_*.json` lưu `id` kiểu số nguyên
-  nhưng đáp án bắt buộc là chuỗi
-- file reference phải **phẳng** `{qid: [id]}`, không phải cấu trúc của `train.json`. Đưa
-  nhầm thì **toàn bộ thí sinh 0 điểm mà không báo lỗi gì**
-
-Đối chứng 7 bài nộp mẫu: `perfect` 1.0/1.0 · `padded` recall 1.0 precision 0.22 ·
-`int_ids` **0.0/0.0**.
-
-### `EDA-LegalIR/`
-`eda_corpus.py`, `eda_chunking.py` — số liệu ở mục 6.
-
-### `Retrieval-LegalIR/`
-
-| File | Việc |
-|---|---|
-| `bm25.py` | build/query inverted index trên đĩa |
-| `eval_bm25.py` | đo Recall/Precision/MRR theo công thức BTC |
-| `sweep_bm25.py` | quét lưới k1/b |
-| `predict.py` | sinh `submission.json` + `.zip` |
-| `encode.py` | trích vector halong_embedding ra memmap |
-| `hybrid.py` | BM25 + dense, hoà bằng RRF hoặc linear |
-| `serve.py` | web UI local, không cần cài gì thêm |
+**`BM25Index.read_chunk()` mở lại file 592 MB cho mỗi chunk.** Lần sinh bài nộp vừa rồi
+gọi 100.000 lần → GPU chỉ đạt 54–92% thay vì bám 100%. Giữ sẵn file handle sẽ rút 25 phút
+xuống còn ~10–15. Nên sửa trước khi chạy private test.
 
 ---
 
 ## 8. Việc tiếp theo
 
-1. **Chạy bảng so hybrid** khi encode xong — 6 cấu hình.
-2. **Từ điển viết tắt** (CCCD, BHXH, GTGT, TNCN, UBND, ATGT…) mở rộng ở phía query. Rẻ hơn
-   dense rất nhiều, đo được ngay.
-3. **Cross-encoder tầng 3** nếu bi-encoder ăn được: BM25 (1.000) → bi-encoder (50) →
-   cross-encoder (5). Bi-encoder nén cả chunk thành 1 vector trước khi thấy câu hỏi nên
-   không "chú ý" được vào đúng đoạn; cross-encoder thì có.
-4. Khoảng trống ngữ nghĩa thật: câu hỏi `"... là bao nhiêu"` ↔ đáp án `"30.000 đồng/thẻ"`
-   không chung một token nào. Không tham số BM25 nào vá được.
+Cách top-1 (0.94) khoảng 0.04.
+
+1. **Fine-tune cross-encoder** trên cùng 6.000 cặp. β tối ưu là 0.5 chứ không phải 1.0 —
+   đó là chữ ký của lệch miền, và fine-tune chữa đúng chỗ đó. Lực đòn bẩy lớn nhất còn lại.
+2. **Bi-encoder 2 epoch** — loss vẫn đang giảm ở bước cuối (3.3547 → 3.3374). 11 phút train
+   + 36 phút encode.
+3. **Word segmentation + bigram cho BM25** — "mức lương cơ sở" đang bị xé thành 4 âm tiết rời.
+4. **Sửa `read_chunk()`** — không tăng điểm nhưng rút ngắn mọi vòng lặp thử nghiệm.
+
+~~Từ điển viết tắt~~ và ~~mở rộng đồng nghĩa bằng LLM~~ đã bị loại sau khi đo (xem 6.1).

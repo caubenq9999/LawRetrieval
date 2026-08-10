@@ -20,6 +20,16 @@ Mock-Eval-LegalIR/mock*/
 Retrieval-LegalIR/submission*.json
 *.out
 *.log
+*.err
+
+# ---- Ung vien / diem trung gian cua thi nghiem (~15 MB, tai tao duoc) ---
+# Ngoai chuyen nang, pairs_*.json va *.gold.json con chua cau hoi + dap an gold
+# lay tu train.json cua BTC -> khong dua len repo.
+Retrieval-LegalIR/pairs_*.json
+Retrieval-LegalIR/sc_*.json
+Retrieval-LegalIR/cands_*.json
+Retrieval-LegalIR/pool_*.npz
+Retrieval-LegalIR/pool_*.npz.gold.json
 
 # ---- Python -------------------------------------------------------------
 __pycache__/

@@ -52,8 +52,10 @@ class Reranker:
             from transformers import XLMRobertaTokenizerFast
             self.tok = XLMRobertaTokenizerFast.from_pretrained(model_id)
         self.model = AutoModelForSequenceClassification.from_pretrained(
-            model_id, dtype=torch.float16 if self.dev == 'cuda' else torch.float32)
-        self.model.to(self.dev).eval()
+            model_id, dtype=torch.float16 if self.dev == 'cuda' else torch.float32,
+            low_cpu_mem_usage=True)
+        self.model.to(self.dev)
+        self.model.eval()
         self.model_id = model_id
 
     def score(self, query, texts):

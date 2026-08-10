@@ -35,7 +35,8 @@ def main():
     p.add_argument('--train', '-t', help='train.json - dung lam nguon do khi query khong khop gi')
     p.add_argument('--k1', type=float, default=3.0)
     p.add_argument('--b', type=float, default=0.75)
-    p.add_argument('--agg', default='top3', choices=['max', 'top3', 'top3_log'])
+    p.add_argument('--agg', default='top3',
+                   help='Gop chunk->doc: max | topN (vd top2, top3)')
     p.add_argument('--emb', help='Thu muc vector -> bat che do hybrid BM25 + dense')
     p.add_argument('--fusion', default='linear', choices=['linear', 'rrf'])
     p.add_argument('--alpha', type=float, default=0.7, help='Trong so DENSE (con lai la BM25)')

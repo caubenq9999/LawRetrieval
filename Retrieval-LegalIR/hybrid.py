@@ -43,7 +43,8 @@ def minmax(x):
 
 
 class Hybrid:
-    def __init__(self, index_dir='index', emb_dir='emb', k1=3.0, b=0.75, device=None):
+    def __init__(self, index_dir='index', emb_dir='emb', k1=3.0, b=0.75, device=None,
+                 qmodel=None):
         self.bm25 = BM25Index(index_dir, k1=k1, b=b)
         with open(os.path.join(emb_dir, 'meta.json'), encoding='utf-8') as f:
             self.emeta = json.load(f)
@@ -52,9 +53,13 @@ class Hybrid:
         self.emb = np.memmap(os.path.join(emb_dir, self.emeta['file']), dtype=dt,
                              mode='r', shape=(self.emeta['n'], self.dim))
         self.dev = device or ('cuda' if torch.cuda.is_available() else 'cpu')
-        self.tok = AutoTokenizer.from_pretrained(MODEL_ID)
+        # Encode cau hoi PHAI dung dung model da encode van ban, neu khong hai ben
+        # nam o hai khong gian vector khac nhau. Truoc day cho cung MODEL_ID nen khi
+        # doi sang emb_ft (sinh boi halong-ft) thi cau hoi van dung model goc.
+        self.qmodel = qmodel or self.emeta.get('model') or MODEL_ID
+        self.tok = AutoTokenizer.from_pretrained(self.qmodel)
         self.model = AutoModel.from_pretrained(
-            MODEL_ID, dtype=torch.float16 if self.dev == 'cuda' else torch.float32)
+            self.qmodel, dtype=torch.float16 if self.dev == 'cuda' else torch.float32)
         self.model.to(self.dev).eval()
 
     def encode_query(self, texts):
@@ -103,6 +108,15 @@ class Hybrid:
         r_dn[np.argsort(-dense)] = np.arange(len(order))
         return order, (1.0 / (RRF_K + 1 + r_bm) + 1.0 / (RRF_K + 1 + r_dn)).astype(np.float32)
 
+    @staticmethod
+    def _agg_score(vals, agg):
+        """max | topN (trung binh N chunk cao nhat). vals da sap giam dan."""
+        if agg == 'max':
+            return vals[0]
+        if agg.startswith('top') and agg[3:].isdigit():
+            return float(np.mean(vals[:int(agg[3:])]))
+        raise ValueError(f'agg khong hop le: {agg}')
+
     def search_docs(self, query, topk=5, pool=1000, fusion='rrf', alpha=0.5, agg='top3',
                     qvec=None):
         order, fused = self.fused_chunk_scores(query, pool, fusion, alpha, qvec)
@@ -116,7 +130,7 @@ class Hybrid:
                 best[d] = int(order[i])
                 vals[d] = []
             vals[d].append(float(fused[i]))
-        out = [(str(d), v[0] if agg == 'max' else float(np.mean(v[:3])), best[d], len(v))
+        out = [(str(d), self._agg_score(v, agg), best[d], len(v))
                for d, v in vals.items()]
         out.sort(key=lambda x: -x[1])
         return out[:topk]

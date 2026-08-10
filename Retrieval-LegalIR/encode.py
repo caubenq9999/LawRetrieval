@@ -54,15 +54,19 @@ def main():
     p.add_argument('--batch', '-b', type=int, default=64)
     p.add_argument('--limit', '-n', type=int, default=0, help='Chi encode N chunk dau (de do thu)')
     p.add_argument('--fp32', action='store_true', help='Luu float32 thay vi float16')
+    p.add_argument('--model', '-m', default=MODEL_ID,
+                   help='Model id tren HuggingFace hoac duong dan model da fine-tune')
     args = p.parse_args()
+
+    model_id = args.model
 
     os.makedirs(args.out, exist_ok=True)
     dev = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    print(f'Nap {MODEL_ID} ...')
-    tok = AutoTokenizer.from_pretrained(MODEL_ID)
+    print(f'Nap {model_id} ...')
+    tok = AutoTokenizer.from_pretrained(model_id)
     model = AutoModel.from_pretrained(
-        MODEL_ID, torch_dtype=torch.float16 if dev == 'cuda' else torch.float32)
+        model_id, dtype=torch.float16 if dev == 'cuda' else torch.float32)
     model.to(dev).eval()
 
     total = args.limit or count_lines(args.chunks)
@@ -123,7 +127,7 @@ def main():
     emb.flush()
     del emb
 
-    meta = {'model': MODEL_ID, 'dim': dim, 'n': total, 'dtype': str(np.dtype(dtype)),
+    meta = {'model': model_id, 'dim': dim, 'n': total, 'dtype': str(np.dtype(dtype)),
             'pooling': 'mean', 'normalized': True, 'max_len': MAX_LEN,
             'chunks_path': os.path.abspath(args.chunks), 'file': os.path.basename(emb_path)}
     with open(os.path.join(args.out, 'meta.json'), 'w', encoding='utf-8') as f:
