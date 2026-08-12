@@ -57,6 +57,9 @@ class Hybrid:
         # nam o hai khong gian vector khac nhau. Truoc day cho cung MODEL_ID nen khi
         # doi sang emb_ft (sinh boi halong-ft) thi cau hoi van dung model goc.
         self.qmodel = qmodel or self.emeta.get('model') or MODEL_ID
+        # Cau hoi phai gop token y het cach da gop cho van ban, neu khong hai ben
+        # lech khong gian. emb/meta.json ghi lai cach gop luc encode.
+        self.pooling = self.emeta.get('pooling', 'mean')
         self.tok = AutoTokenizer.from_pretrained(self.qmodel)
         self.model = AutoModel.from_pretrained(
             self.qmodel, dtype=torch.float16 if self.dev == 'cuda' else torch.float32)
@@ -67,8 +70,11 @@ class Hybrid:
                        return_tensors='pt').to(self.dev)
         with torch.no_grad():
             h = self.model(**enc).last_hidden_state
-            m = enc['attention_mask'].unsqueeze(-1).to(h.dtype)
-            v = (h * m).sum(1) / m.sum(1).clamp(min=1e-9)
+            if self.pooling == 'cls':
+                v = h[:, 0]
+            else:
+                m = enc['attention_mask'].unsqueeze(-1).to(h.dtype)
+                v = (h * m).sum(1) / m.sum(1).clamp(min=1e-9)
             if self.dim < v.shape[1]:
                 v = v[:, :self.dim]
             v = torch.nn.functional.normalize(v.float(), p=2, dim=1)

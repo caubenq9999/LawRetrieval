@@ -49,7 +49,13 @@ Thumbs.db
 __MACOSX/
 
 # ---- Ngoai pham vi repo (van con tren dia) -----------------------------
-Finetune-LegalIR/
 Scoring-Program-Task-LegalIR/
 Mock-Eval-LegalIR/
 EDA-LegalIR/
+
+# ---- Finetune: giu code, bo du lieu va model ---------------------------
+# Truoc day chan ca thu muc Finetune-LegalIR/, nhung nhu vay chan luon 5 file
+# .py ma RUNNING.md muc 6 huong dan dung. Gio chi chan phan nang.
+Finetune-LegalIR/data*/
+Finetune-LegalIR/models*/
+Finetune-LegalIR/logs*/

@@ -38,6 +38,39 @@ def mean_pool(last_hidden, mask):
     return (last_hidden * m).sum(1) / m.sum(1).clamp(min=1e-9)
 
 
+def detect_pooling(model_id):
+    """Doc 1_Pooling/config.json cua model thay vi cam cung 'mean'.
+
+    halong/e5 dung mean, con ho BGE-M3 (bge-m3, Vietnamese_Embedding_V2) dung CLS.
+    Lay trung binh token cua mot model huan luyen theo CLS se ra vector lech han,
+    ma khong bao loi - hong am tham, kieu te nhat.
+    """
+    import json as _json
+    cfg = None
+    local = os.path.join(model_id, '1_Pooling', 'config.json')
+    if os.path.exists(local):
+        with open(local, encoding='utf-8') as f:
+            cfg = _json.load(f)
+    else:
+        try:
+            from huggingface_hub import hf_hub_download
+            with open(hf_hub_download(model_id, '1_Pooling/config.json'),
+                      encoding='utf-8') as f:
+                cfg = _json.load(f)
+        except Exception:
+            pass
+    if not cfg:
+        print('  khong doc duoc 1_Pooling/config.json -> mac dinh mean')
+        return 'mean', None
+    if cfg.get('pooling_mode') in ('mean', 'cls'):
+        mode = cfg['pooling_mode']
+    elif cfg.get('pooling_mode_cls_token'):
+        mode = 'cls'
+    else:
+        mode = 'mean'
+    return mode, cfg.get('word_embedding_dimension') or cfg.get('embedding_dimension')
+
+
 def count_lines(path):
     n = 0
     with open(path, 'rb') as f:
@@ -64,6 +97,8 @@ def main():
     dev = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     print(f'Nap {model_id} ...')
+    pool_mode, model_dim = detect_pooling(model_id)
+    print(f'  pooling: {pool_mode} | chieu goc: {model_dim}')
     tok = AutoTokenizer.from_pretrained(model_id)
     model = AutoModel.from_pretrained(
         model_id, dtype=torch.float16 if dev == 'cuda' else torch.float32)
@@ -72,6 +107,9 @@ def main():
     total = args.limit or count_lines(args.chunks)
     dtype = np.float32 if args.fp32 else np.float16
     dim = args.dim
+    if model_dim and args.dim == 768 and model_dim != 768:
+        dim = model_dim          # khong cat Matryoshka khi model khong phai 768
+        print(f'  --dim de mac dinh 768 nhung model ra {model_dim} -> dung {dim}')
     emb_path = os.path.join(args.out, f'emb_{dim}.f16' if dtype == np.float16 else f'emb_{dim}.f32')
     emb = np.memmap(emb_path, dtype=dtype, mode='w+', shape=(total, dim))
 
@@ -100,7 +138,8 @@ def main():
             enc = {k: v.to(dev) for k, v in enc.items()}
             with torch.no_grad():
                 out = model(**enc).last_hidden_state
-                vec = mean_pool(out, enc['attention_mask'])
+                vec = (out[:, 0] if pool_mode == 'cls'
+                       else mean_pool(out, enc['attention_mask']))
                 if dim < vec.shape[1]:
                     vec = vec[:, :dim]                   # Matryoshka: cat roi chuan hoa lai
                 vec = torch.nn.functional.normalize(vec.float(), p=2, dim=1)
@@ -128,7 +167,7 @@ def main():
     del emb
 
     meta = {'model': model_id, 'dim': dim, 'n': total, 'dtype': str(np.dtype(dtype)),
-            'pooling': 'mean', 'normalized': True, 'max_len': MAX_LEN,
+            'pooling': pool_mode, 'normalized': True, 'max_len': MAX_LEN,
             'chunks_path': os.path.abspath(args.chunks), 'file': os.path.basename(emb_path)}
     with open(os.path.join(args.out, 'meta.json'), 'w', encoding='utf-8') as f:
         json.dump(meta, f, indent=2)
