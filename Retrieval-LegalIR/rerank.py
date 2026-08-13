@@ -70,6 +70,26 @@ class Reranker:
         return out
 
 
+def _agg(v, agg):
+    """Gop diem cac chunk cua mot van ban thanh diem van ban. v da sap giam dan.
+
+        max        - chi lay chunk manh nhat
+        topN       - trung binh N chunk manh nhat
+        max+W      - chunk manh nhat cong W lan chunk thu hai
+
+    'max+W' co ly khi reranker da du gioi: van ban gold thuong chi co DUNG MOT
+    doan chua cau tra loi, doan thu hai chi tam tam. Lay trung binh se pha loang
+    tin hieu do, con van ban sai co hai doan deu deu lai noi len. Do tren 500 cau
+    validation sach: max+0.4 cho 0.9377 so voi 0.9277 cua top2.
+    """
+    if agg == 'max':
+        return v[0]
+    if agg.startswith('max+'):
+        return v[0] + float(agg[4:]) * (v[1] if len(v) > 1 else 0.0)
+    n = int(agg[3:]) if agg.startswith('top') and agg[3:].isdigit() else 3
+    return float(np.mean(v[:n]))
+
+
 def rerank_docs(h, rr, query, topk=5, pool=1000, alpha=0.7, agg='top3',
                 n_docs=20, m_chunks=3, qvec=None, beta=1.0):
     """Hybrid lay ung vien -> cross-encoder cham lai -> top-k van ban.
@@ -107,8 +127,7 @@ def rerank_docs(h, rr, query, topk=5, pool=1000, alpha=0.7, agg='top3',
     for (d, ci), s in sorted(zip(cand, scores), key=lambda x: -x[1]):
         vals.setdefault(d, []).append(float(s))
         best.setdefault(d, ci)
-    out = [(str(d), v[0] if agg == 'max' else float(np.mean(v[:3])), best[d], len(v))
-           for d, v in vals.items()]
+    out = [(str(d), _agg(v, agg), best[d], len(v)) for d, v in vals.items()]
     out.sort(key=lambda x: -x[1])
     return out[:topk]
 

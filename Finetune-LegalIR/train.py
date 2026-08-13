@@ -46,6 +46,22 @@ from transformers import TrainerCallback
 
 BASE_MODEL = 'hiieu/halong_embedding'
 MATRYOSHKA_DIMS = [768, 512, 256, 128]
+LORA_TARGETS = ['query', 'key', 'value']
+
+
+def merge_and_strip(module):
+    """Gop delta LoRA vao trong so goc roi go lop boc, tra ve nn.Linear thuan.
+
+    Can lam vay de model luu ra nap duoc bang AutoModel binh thuong - encode.py
+    khong phai biet gi ve LoRA.
+    """
+    from peft.tuners.lora import LoraLayer
+    for name, child in list(module.named_children()):
+        if isinstance(child, LoraLayer):
+            child.merge()
+            setattr(module, name, child.base_layer)
+        else:
+            merge_and_strip(child)
 
 log = logging.getLogger('ft')
 
@@ -119,6 +135,7 @@ def main():
         description='Fine-tune bi-encoder cho LegalIR.',
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--data', '-d', default='data/pairs.jsonl')
+    p.add_argument('--base', default=BASE_MODEL, help='Model nen de fine-tune')
     p.add_argument('--out', '-o', default='models/halong-ft')
     p.add_argument('--log', default='logs/train.log')
     p.add_argument('--epochs', type=float, default=1.0)
@@ -132,6 +149,13 @@ def main():
     p.add_argument('--warmup', type=float, default=0.1)
     p.add_argument('--no-cache', action='store_true',
                    help='Dung MNRL thuong thay vi GradCache (can batch nho)')
+    p.add_argument('--lora', action='store_true',
+                   help='Fine-tune bang LoRA thay vi toan bo trong so. Bat buoc voi '
+                        'model 568M tro len: full fine-tune can ~7.9 GB chi rieng '
+                        'trong so + trang thai AdamW, vuot 6.4 GB VRAM.')
+    p.add_argument('--rank', type=int, default=16, help='Hang cua LoRA')
+    p.add_argument('--no-matryoshka', action='store_true',
+                   help='Bo MatryoshkaLoss (chi nen giu neu model goc duoc train bang no)')
     p.add_argument('--smoke', action='store_true',
                    help='Chay 30 buoc de do VRAM/toc do, khong luu model')
     args = p.parse_args()
@@ -151,9 +175,26 @@ def main():
     log.info(f'Du lieu: {len(ds)} mau ({skipped} cau bi bo vi thieu negative)')
     log.info(f'Cot: {ds.column_names}')
 
-    log.info(f'Nap model goc: {BASE_MODEL}')
-    model = SentenceTransformer(BASE_MODEL)
+    log.info(f'Nap model goc: {args.base}')
+    model = SentenceTransformer(args.base)
     model.max_seq_length = args.maxlen
+    out_dim = model.get_sentence_embedding_dimension()
+    log.info(f'Chieu dau ra: {out_dim}')
+
+    if args.lora:
+        from peft import LoraConfig, inject_adapter_in_model
+        backbone = model[0].auto_model
+        inject_adapter_in_model(
+            LoraConfig(r=args.rank, lora_alpha=args.rank * 2, lora_dropout=0.05,
+                       target_modules=LORA_TARGETS, bias='none'),
+            backbone)
+        backbone.enable_input_require_grads()
+        backbone.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={'use_reentrant': False})
+        tr = sum(x.numel() for x in backbone.parameters() if x.requires_grad)
+        tot = sum(x.numel() for x in backbone.parameters())
+        log.info(f'LoRA r={args.rank} tren {LORA_TARGETS} + gradient checkpointing')
+        log.info(f'  train {tr / 1e6:.1f}M / {tot / 1e6:.0f}M tham so ({100 * tr / tot:.2f}%)')
 
     if args.no_cache:
         inner = MultipleNegativesRankingLoss(model)
@@ -161,8 +202,14 @@ def main():
     else:
         inner = CachedMultipleNegativesRankingLoss(model, mini_batch_size=args.mini)
         log.info(f'Loss: CachedMultipleNegativesRankingLoss (GradCache, mini={args.mini})')
-    loss = MatryoshkaLoss(model, inner, matryoshka_dims=MATRYOSHKA_DIMS)
-    log.info(f'Boc trong MatryoshkaLoss, dims={MATRYOSHKA_DIMS}')
+    if args.no_matryoshka:
+        loss = inner
+        log.info('Khong boc Matryoshka')
+    else:
+        dims = [d for d in ([out_dim] + MATRYOSHKA_DIMS) if d <= out_dim]
+        dims = sorted(set(dims), reverse=True)
+        loss = MatryoshkaLoss(model, inner, matryoshka_dims=dims)
+        log.info(f'Boc trong MatryoshkaLoss, dims={dims}')
 
     steps = 30 if args.smoke else int(len(ds) * args.epochs / args.batch)
     seqs = args.batch * (2 + args.neg)
@@ -209,6 +256,9 @@ def main():
                  f'uoc {full_steps * el / 30 / 60:.0f} phut')
         log.info('Smoke test xong, KHONG luu model.')
     else:
+        if args.lora:
+            log.info('Gop LoRA vao trong so goc ...')
+            merge_and_strip(model[0].auto_model)
         os.makedirs(args.out, exist_ok=True)
         model.save_pretrained(args.out)
         log.info(f'Da luu model: {args.out}')

@@ -30,8 +30,16 @@ BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..',
 TRAIN = os.path.join(BASE, 'train.json')
 SPLIT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..',
                      'Finetune-LegalIR', 'data', 'split.json')
-RERANKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..',
-                        'Finetune-LegalIR', 'models', 'reranker-ft-fp16')
+def _pick_reranker():
+    """Uu tien ban fp16 neu co (nap nhanh hon), khong thi dung ban goc.
+    Hai ban cho ket qua giong nhau tung bit - xem ghi chu trong prior.py."""
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..',
+                        'Finetune-LegalIR', 'models')
+    fp16 = os.path.join(base, 'reranker-ft-fp16')
+    return fp16 if os.path.isdir(fp16) else os.path.join(base, 'reranker-ft')
+
+
+RERANKER = _pick_reranker()
 
 POOL = 2000
 NDOCS = 50
@@ -56,7 +64,8 @@ def cmd_dump(args):
     from hybrid import Hybrid
 
     train = load_json(TRAIN)
-    val = [str(q) for q in load_json(SPLIT)['val'] if str(q) in train][:args.n]
+    val = [str(q) for q in load_json(SPLIT)['val'] if str(q) in train]
+    val = val[args.offset:args.offset + args.n] if args.n else val[args.offset:]
     h = Hybrid('index', args.emb, k1=2.5, b=0.9)
     print(f'{len(val)} cau | query encoder: {h.qmodel}')
 
@@ -213,30 +222,42 @@ def cmd_sweep(args):
     half = n // 2
     rng = np.random.default_rng(0)
     boot = rng.integers(0, n, size=(4000, n))
-    ref = recall(args.ref_alpha, args.beta, args.lam)
-    print(f'{n} cau | moc: alpha={args.ref_alpha} beta={args.beta} lam={args.lam} '
-          f'-> {ref.mean():.4f}\n')
-    print('-' * 76)
-    print(f'{"alpha":>7}{"Recall@5":>11}{"delta":>10}{"nua dau":>10}{"nua sau":>10}'
-          f'{"boot 95% CI":>24}')
-    print('-' * 76)
+
+    ra, rb, rl = args.ref
+    ref = recall(ra, rb, rl)
+    print(f'{n} cau | moc alpha={ra} beta={rb} lam={rl} -> {ref.mean():.4f}\n')
+
+    # Quet luoi. Chon tren NUA DAU, kiem chung tren NUA SAU - cung quy trinh
+    # muc 5 RESULTS.md, vi luoi cang lon thi cang de chon trung nhieu.
     rows = []
     for a in args.alphas:
-        r = recall(a, args.beta, args.lam)
+        for b in args.betas:
+            for l in args.lams:
+                r = recall(a, b, l)
+                rows.append((a, b, l, r))
+
+    print(f'{"alpha":>6}{"beta":>6}{"lam":>6}{"Recall@5":>11}{"delta":>9}'
+          f'{"nua dau":>9}{"nua sau":>9}{"boot 95% CI":>22}')
+    print('-' * 78)
+    for a, b, l, r in rows:
         d = r - ref
         bs = d[boot].mean(axis=1)
         lo, hi = np.percentile(bs, [2.5, 97.5])
-        rows.append((a, r))
-        print(f'{a:>7}{r.mean():>11.4f}{d.mean():>+10.4f}'
-              f'{r[:half].mean():>10.4f}{r[half:].mean():>10.4f}'
-              f'{f"[{lo:+.4f}, {hi:+.4f}]":>24}')
-    print('-' * 76)
-    best_h1 = max(rows, key=lambda t: t[1][:half].mean())
-    print(f'\nChon tren NUA DAU : alpha={best_h1[0]} ({best_h1[1][:half].mean():.4f})')
-    print(f'Kiem chung NUA SAU: {best_h1[1][half:].mean():.4f} '
-          f'(moc nua sau {ref[half:].mean():.4f})')
-    print(f'Ca {n} cau        : {best_h1[1].mean():.4f} '
-          f'({best_h1[1].mean() - ref.mean():+.4f})')
+        star = ' *' if (a, b, l) == (ra, rb, rl) else ''
+        print(f'{a:>6}{b:>6}{l:>6}{r.mean():>11.4f}{d.mean():>+9.4f}'
+              f'{r[:half].mean():>9.4f}{r[half:].mean():>9.4f}'
+              f'{f"[{lo:+.4f}, {hi:+.4f}]":>22}{star}')
+    print('-' * 78)
+
+    best = max(rows, key=lambda t: t[3][:half].mean())
+    a, b, l, r = best
+    d = r - ref
+    bs = d[boot].mean(axis=1)
+    lo, hi = np.percentile(bs, [2.5, 97.5])
+    print(f'\nChon tren NUA DAU : alpha={a} beta={b} lam={l} -> {r[:half].mean():.4f}')
+    print(f'Kiem chung NUA SAU: {r[half:].mean():.4f}  (moc nua sau {ref[half:].mean():.4f})')
+    print(f'Ca {n} cau        : {r.mean():.4f} ({d.mean():+.4f}), '
+          f'CI [{lo:+.4f}, {hi:+.4f}], thang {(bs > 0).mean() * 100:.1f}%')
     return 0
 
 
@@ -247,6 +268,8 @@ def main():
 
     a = sub.add_parser('dump')
     a.add_argument('-n', type=int, default=500)
+    a.add_argument('--offset', type=int, default=0,
+                   help='Bo qua N cau dau. Dung de lay nua SAU cua tap validation - nua dau da bi dung de chon tham so nhieu lan nen khong con trung thuc.')
     a.add_argument('--emb', default='emb_ft')
     a.add_argument('-o', '--out', required=True)
     a.set_defaults(fn=cmd_dump)
@@ -262,9 +285,11 @@ def main():
     c.add_argument('-d', '--dump', required=True)
     c.add_argument('-s', '--scores', required=True)
     c.add_argument('--alphas', type=float, nargs='+', default=ALPHAS)
-    c.add_argument('--beta', type=float, default=0.7)
-    c.add_argument('--lam', type=float, default=0.2)
-    c.add_argument('--ref-alpha', type=float, default=0.7)
+    c.add_argument('--betas', type=float, nargs='+', default=[0.7],
+                   help='Truyen nhieu gia tri de quet luoi alpha x beta')
+    c.add_argument('--lams', type=float, nargs='+', default=[0.2])
+    c.add_argument('--ref', type=float, nargs=3, default=[0.7, 0.7, 0.2],
+                   metavar=('A', 'B', 'L'), help='Cau hinh moc de so delta')
     c.set_defaults(fn=cmd_sweep)
 
     args = p.parse_args()

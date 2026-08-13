@@ -39,10 +39,21 @@ TRAIN = os.path.join(BASE, 'train.json')
 PUBLIC = os.path.join(BASE, 'public-official.json')
 SPLIT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..',
                      'Finetune-LegalIR', 'data', 'split.json')
-# Ban fp16 cua reranker-ft (cung trong so, chi doi dtype tren dia). Ban fp32 2.27 GB
-# khong map noi tren may nay: pagefile 3.3 GB, nap den giua chung thi tien trinh chet.
-RERANKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..',
-                        'Finetune-LegalIR', 'models', 'reranker-ft-fp16')
+def _pick_reranker():
+    """Uu tien ban fp16 (nap nhanh hon, doc 1.14 GB thay vi 2.27 GB), khong co
+    thi dung ban goc do train_ce.py sinh ra.
+
+    Ket qua hai ban giong nhau TUNG BIT - da do tren 2.911 diem, sai lech 0.0.
+    Vi rerank.py cast sang fp16 luc nap len GPU du checkpoint tren dia la gi,
+    ma ban fp16 chinh la ket qua cua dung phep cast do.
+    """
+    base = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..',
+                        'Finetune-LegalIR', 'models')
+    fp16 = os.path.join(base, 'reranker-ft-fp16')
+    return fp16 if os.path.isdir(fp16) else os.path.join(base, 'reranker-ft')
+
+
+RERANKER = _pick_reranker()
 
 # Cau hinh tot nhat hien tai (Finetune-LegalIR/logs/rr_beta_ft.log: val 0.9330)
 CFG = dict(k1=2.5, b=0.9, pool=2000, alpha=0.7, agg='top3',
@@ -100,6 +111,7 @@ def cmd_dump(args):
     # duoc lo commit lien tuc luc con rong nhat. Nap bi-encoder truoc thi den luot
     # no chi con manh vun -> "paging file too small".
     rr = Reranker(args.reranker, batch=16)
+    CFG['alpha'], CFG['beta'], CFG['agg'] = args.alpha, args.beta, args.agg
     h = Hybrid(args.index, args.emb, k1=CFG['k1'], b=CFG['b'])
     print(f'BM25   : k1={CFG["k1"]} b={CFG["b"]} | pool {CFG["pool"]}')
     print(f'Dense  : {args.emb} alpha={CFG["alpha"]}')
@@ -253,6 +265,13 @@ def main():
     d.add_argument('--emb', default='emb_ft')
     d.add_argument('--reranker', default=RERANKER)
     d.add_argument('--limit', type=int, default=0, help='Chi chay N cau dau - de thu nhanh')
+    d.add_argument('--alpha', type=float, default=CFG['alpha'])
+    d.add_argument('--agg', default=CFG['agg'],
+                   help="Gop chunk->van ban: max | topN | max+W. 'max+0.4' do duoc "
+                        "tot nhat sau khi reranker da fine-tune.")
+    d.add_argument('--beta', type=float, default=CFG['beta'],
+                   help='Trong so cross-encoder. Quet lai moi khi doi model dense: '
+                        'dense manh hon thi beta toi uu giam xuong.')
     d.set_defaults(fn=cmd_dump)
 
     s = sub.add_parser('sweep', help='Quet lam tren validation')

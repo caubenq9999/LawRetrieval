@@ -14,7 +14,7 @@ Vi cac model cham tren cung bo ung vien va cung tap cau hoi nen so sanh duoc the
 CAP: bootstrap tren hieu so tung cau, nhieu thap hon nhieu so voi so sanh doc lap.
 
     python ce_bench.py pairs -n 500 -o pairs_val500.json
-    python ce_bench.py score -p pairs_val500.json --model ../Finetune-LegalIR/models/reranker-ft-fp16 --kind seq  -o sc_ft.json
+    python ce_bench.py score -p pairs_val500.json --model ../Finetune-LegalIR/models/reranker-ft --kind seq  -o sc_ft.json
     python ce_bench.py score -p pairs_val500.json --model Qwen/Qwen3-Reranker-0.6B --kind qwen3 -o sc_qwen06.json
     python ce_bench.py eval  -p pairs_val500.json -s sc_ft.json sc_qwen06.json
 """
@@ -50,8 +50,8 @@ def cmd_pairs(args):
     from hybrid import Hybrid
 
     train = load_json(TRAIN)
-    val = [q for q in load_json(SPLIT)['val'] if str(q) in train]
-    val = [str(q) for q in val][:args.n]
+    val = [str(q) for q in load_json(SPLIT)['val'] if str(q) in train]
+    val = val[args.offset:args.offset + args.n] if args.n else val[args.offset:]
     print(f'{len(val)} cau validation')
 
     h = Hybrid('index', args.emb, k1=CFG['k1'], b=CFG['b'])
@@ -111,14 +111,23 @@ def _texts_for(pairs, idx_dir='index'):
     return cache
 
 
+def _segmenter():
+    """Bo tach tu tieng Viet. PhoBERT bat buoc dau vao da tach ('muc_luong co_so')
+    vi BPE cua no xay tren van ban da tach - khong tach thi tu bi vo vun."""
+    from pyvi import ViTokenizer
+    return ViTokenizer.tokenize
+
+
 class SeqScorer:
-    """Cross-encoder kieu phan loai cap (XLM-R, BGE-m3, ViRanker...)."""
+    """Cross-encoder kieu phan loai cap (XLM-R, BGE-m3, ViRanker, PhoRanker...)."""
     kind = 'seq'
 
-    def __init__(self, model_id, batch):
+    def __init__(self, model_id, batch, maxlen=MAX_LEN, segment=False):
         import torch
         from transformers import AutoModelForSequenceClassification, AutoTokenizer
         self.torch, self.batch = torch, batch
+        self.maxlen = maxlen
+        self.seg = _segmenter() if segment else None
         self.dev = 'cuda' if torch.cuda.is_available() else 'cpu'
         try:
             self.tok = AutoTokenizer.from_pretrained(model_id)
@@ -131,10 +140,14 @@ class SeqScorer:
 
     def score(self, query, texts):
         out = np.empty(len(texts), dtype=np.float32)
+        if self.seg is not None:
+            query = self.seg(query)
         for s in range(0, len(texts), self.batch):
             part = texts[s:s + self.batch]
+            if self.seg is not None:
+                part = [self.seg(t) for t in part]
             enc = self.tok([query] * len(part), part, padding=True, truncation=True,
-                           max_length=MAX_LEN, return_tensors='pt').to(self.dev)
+                           max_length=self.maxlen, return_tensors='pt').to(self.dev)
             with self.torch.no_grad():
                 out[s:s + len(part)] = self.model(**enc).logits[:, 0].float().cpu().numpy()
         return out
@@ -233,7 +246,8 @@ def cmd_score(args):
 
     print(f'nap {args.model} (kind={args.kind}, batch={args.batch})...', flush=True)
     t = time.time()
-    sc = (SeqScorer(args.model, args.batch) if args.kind == 'seq'
+    sc = (SeqScorer(args.model, args.batch, args.maxlen, args.segment)
+          if args.kind == 'seq'
           else YesNoScorer(args.model, args.batch, args.kind))
     print(f'  {time.time() - t:.0f}s')
 
@@ -332,6 +346,8 @@ def main():
 
     a = sub.add_parser('pairs')
     a.add_argument('-n', type=int, default=500)
+    a.add_argument('--offset', type=int, default=0,
+                   help='Bo qua N cau dau. --offset 500 lay nua SAU cua tap validation, phan chua tung dung de chon tham so.')
     a.add_argument('--emb', default='emb_ft')
     a.add_argument('-o', '--out', required=True)
     a.set_defaults(fn=cmd_pairs)
@@ -341,6 +357,10 @@ def main():
     b.add_argument('--model', required=True)
     b.add_argument('--kind', default='seq', choices=['seq', 'qwen3', 'gemma'])
     b.add_argument('--batch', type=int, default=16)
+    b.add_argument('--maxlen', type=int, default=MAX_LEN,
+                   help='PhoBERT chi co 258 vi tri -> phai dat 256, khong thi CUDA assert')
+    b.add_argument('--segment', action='store_true',
+                   help='Tach tu tieng Viet truoc khi tokenize (bat buoc voi PhoBERT)')
     b.add_argument('-o', '--out', required=True)
     b.set_defaults(fn=cmd_score)
 

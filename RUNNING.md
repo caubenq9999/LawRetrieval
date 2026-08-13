@@ -30,15 +30,15 @@ tuỳ chọn**.
         │  lấy 2.000 chunk                │  chấm lại đúng 2.000 chunk đó
         └────────────────┬────────────────┘
                          ▼
-              hoà điểm: 0.7×dense + 0.3×BM25
+              hoà điểm: 0.7×dense + 0.3×BM25          (α=0.7)
                          ▼
               50 văn bản × 2 chunk mạnh nhất
                          ▼
               cross-encoder chấm lại từng cặp
                          ▼
-              trộn: 0.7×cross-encoder + 0.3×hybrid
+              trộn: 0.5×cross-encoder + 0.5×hybrid     (β=0.5)
                          ▼
-              gộp chunk → văn bản (trung bình 2 chunk cao nhất)
+              gộp chunk → văn bản: max + 0.4×chunk nhì
                          ▼
               + prior độ phổ biến (λ=0.2)
                          ▼
@@ -119,7 +119,7 @@ Không có GPU: thêm `--skip-encode` để chạy BM25 thuần — nhanh, nhưn
 
 ---
 
-## 5. Chạy đầy đủ — cấu hình đạt 0.9277
+## 5. Chạy đầy đủ — cấu hình đạt 0.9456 trên public
 
 `run_all.py` chưa bao phủ hai tầng cuối. Đường đầy đủ chạy thủ công, sáu bước.
 
@@ -177,9 +177,13 @@ python bm25.py query --index index "mức lương cơ sở là bao nhiêu" --top
 ```bash
 python encode.py \
   --chunks ../Chunking-LegalIR/chunks.jsonl \
-  --out emb_v2 \
-  --model "AITeamVN/Vietnamese_Embedding_V2"
+  --out emb_v2ft \
+  --model ../Finetune-LegalIR/models/v2-ft
 ```
+
+`v2-ft` là `AITeamVN/Vietnamese_Embedding_V2` đã fine-tune bằng LoRA (mục 6.2). Chưa
+fine-tune thì dùng thẳng `--model "AITeamVN/Vietnamese_Embedding_V2"`, mất ~0.016 Recall
+ở tầng hybrid.
 
 **112 phút → 952 MB** (487.194 × 1024 chiều, fp16).
 
@@ -188,17 +192,18 @@ Chi tiết này quan trọng: họ e5 (halong) dùng mean pooling, họ BGE-M3 d
 trung bình token của một model huấn luyện theo CLS sẽ ra vector lệch hẳn mà **không báo lỗi
 gì** — hỏng âm thầm, kiểu tệ nhất.
 
-Kiểu pooling được ghi vào `emb_v2/meta.json`, và `hybrid.py` đọc lại từ đó để encode câu hỏi
+Kiểu pooling được ghi vào `emb_v2ft/meta.json`, và `hybrid.py` đọc lại từ đó để encode câu hỏi
 đúng cách. Đừng sửa tay file này.
 
 Các model đã thử, đo trên 500 câu validation:
 
 | Model | Tham số | Recall@5 tầng hybrid |
 |---|---:|---:|
-| `AITeamVN/Vietnamese_Embedding_V2` | 568M | **0.9103** |
-| `halong-ft` (halong fine-tune 6.000 cặp) | 278M | 0.9067 |
-| `hiieu/halong_embedding` (gốc) | 278M | thấp hơn rõ |
-| `BAAI/bge-m3` | 568M | thấp hơn V2 |
+| **`v2-ft`** (V2 + LoRA trên 6.000 cặp) | 568M | **0.9263** |
+| `AITeamVN/Vietnamese_Embedding_V2` zero-shot | 568M | 0.9103 |
+| `halong-ft` (halong + full fine-tune) | 278M | 0.9067 |
+| `BAAI/bge-m3` zero-shot | 568M | thấp hơn V2 |
+| `hiieu/halong_embedding` gốc | 278M | thấp nhất |
 
 ### 5.4 Fine-tune — tuỳ chọn, xem mục 6
 
@@ -213,8 +218,9 @@ gói.
 ```bash
 python prior.py dump \
   --questions "../LegalIR - Public Test/public-official.json" \
-  --emb emb_v2 \
+  --emb emb_v2ft \
   --reranker ../Finetune-LegalIR/models/reranker-ft \
+  --alpha 0.7 --beta 0.5 --agg "max+0.4" \
   -o cands_pub.json
 
 python prior.py submit -c cands_pub.json --lam 0.2 -o submission
@@ -290,10 +296,18 @@ này đều dùng đúng tập 1.000 câu này** — nếu bạn đào lại d�
 ### 6.2 Fine-tune bi-encoder
 
 ```bash
+# model 278M: full fine-tune duoc
 python train.py --epochs 1 --out models/halong-ft
+
+# model 568M (V2, bge-m3): bat buoc LoRA, khong thi het VRAM
+python train.py --base "AITeamVN/Vietnamese_Embedding_V2" --lora                 --lr 1e-4 --batch 64 --mini 8 --epochs 1 --out models/v2-ft
 ```
 
-**11 phút, VRAM đỉnh 5,58/6,4 GB → +0.029 Recall.**
+**Full fine-tune 278M: 11 phút, VRAM 5,58/6,4 GB → +0.029 Recall.**
+**LoRA 568M: 36 phút, VRAM 2,70 GB → +0.016 Recall ở tầng hybrid.**
+
+`--lr 1e-4` chứ không phải 2e-5: LoRA chỉ cập nhật 0,41% tham số nên cần learning rate
+cao hơn full fine-tune một bậc.
 
 Loss là `CachedMultipleNegativesRankingLoss` bọc trong `MatryoshkaLoss`. MNRL dùng mọi mẫu
 khác trong batch làm negative miễn phí, nên **batch càng lớn càng tốt**; bản Cached
@@ -309,10 +323,13 @@ yên (7 câu tốt lên, 6 câu xấu đi). Đường loss đi bậc thang — r
 epoch rồi nằm ngang — đó là chữ ký của học thuộc. **5.999 cặp bị vắt kiệt sau đúng một
 lượt.** Muốn tiến thêm thì phải thêm dữ liệu, không phải thêm vòng lặp.
 
-> **Chỉ chạy được với model cỡ 278M.** `train.py` đang full fine-tune, mà model 568M như
-> Vietnamese_Embedding_V2 cần ~7,9 GB chỉ riêng cho trọng số và trạng thái AdamW — vượt
-> 6,4 GB VRAM. Muốn fine-tune model 568M thì phải chuyển `train.py` sang LoRA; `train_ce.py`
-> đã có sẵn mẫu để bê sang. **Chưa ai làm.**
+> **Vì sao 568M bắt buộc LoRA:** full fine-tune cần ~7,9 GB chỉ riêng cho trọng số fp16
+> (1,1) + bản gốc fp32 (2,3) + hai momentum của AdamW (4,5) — vượt 6,4 GB trước cả khi
+> tính activation. LoRA chỉ giữ momentum cho 0,41% tham số nên xuống còn 2,7 GB.
+>
+> **Chưa thử: full fine-tune 568M bằng Adafactor** thay AdamW. Adafactor phân rã moment
+> bậc hai nên trạng thái từ 4,5 GB xuống vài trăm MB, ước tổng ~4 GB. Đây là đòn bẩy lớn
+> chưa ai chạm — LoRA bị giới hạn trong không gian hạng 16, full fine-tune thì không.
 
 Sau khi train phải encode lại toàn bộ corpus bằng model mới (mục 5.3), 112 phút.
 
@@ -360,7 +377,7 @@ tuyến trong vài giây.
 ### So sánh nhiều cross-encoder — `ce_bench.py`
 
 ```bash
-python ce_bench.py pairs -n 500 --emb emb_v2 -o pairs_val.json          # 1 phút
+python ce_bench.py pairs -n 500 --emb emb_v2ft -o pairs_val.json        # 1 phút
 python ce_bench.py score -p pairs_val.json --model <model> --kind seq -o sc_a.json   # 12 phút
 python ce_bench.py eval  -p pairs_val.json -s sc_a.json sc_b.json       # vài giây
 ```
@@ -379,9 +396,9 @@ mù. Loại ứng viên bằng AUC trước, chỉ chạy Recall đầy đủ ch
 ### Quét α, β, λ — `sweep_alpha.py`
 
 ```bash
-python sweep_alpha.py dump  -n 500 --emb emb_v2 -o pool_val.npz    # 1 phút
+python sweep_alpha.py dump  -n 500 --emb emb_v2ft -o pool_val.npz  # 1 phút
 python sweep_alpha.py score -d pool_val.npz -o sc_union.json       # 23 phút
-python sweep_alpha.py sweep -d pool_val.npz -s sc_union.json --beta 0.7 --lam 0.2
+python sweep_alpha.py sweep -d pool_val.npz -s sc_union.json        --alphas 0.6 0.7 0.8 --betas 0.4 0.5 0.6 --lams 0.1 0.2 0.3
 ```
 
 Mẹo: pool 2.000 chunk do **BM25** chọn nên không phụ thuộc α. Chỉ cần lưu điểm BM25 và dense
@@ -422,6 +439,54 @@ stdlib, không cần cài thêm.
 
 ---
 
+## 7b. Cách đo cho khỏi tự lừa mình
+
+`split.json` tách 1.000 câu validation. **Chia đôi nó và dùng hai nửa cho hai việc khác
+nhau:**
+
+```bash
+python ce_bench.py pairs -n 500            -o pairs_a.json   # nua DAU: sinh gia thuyet
+python ce_bench.py pairs -n 500 --offset 500 -o pairs_b.json  # nua SAU: xac nhan
+```
+
+Lý do: nửa đầu đã được dùng để chọn α, β, λ, chọn embedder, chọn reranker — nhiều lần. Mỗi
+lần chọn lại làm nó lạc quan thêm. Số đo được:
+
+| Thay đổi | Nửa đầu (đã dùng nhiều lần) | Nửa sau (sạch) | Public thật |
+|---|---:|---:|---:|
+| β 0.7 → 0.4 | +0.0137 | **+0.0030** | **+0.0035** |
+
+Nửa sạch dự đoán public **sai lệch 0.0005**. Nửa bẩn thổi phồng gấp bốn.
+
+Nửa sau cũng là tài nguyên tiêu hao — dùng nó chọn tham số vài lần là cháy y hệt. Chỉ đem ra
+khi đã có đúng một ứng viên rõ ràng, đừng quét lưới trên đó.
+
+---
+
+## 7c. Những hướng đã thử và đã đóng
+
+Ghi lại để không ai mất thời gian làm lại. Tất cả đều đo trên tập validation sạch.
+
+| Hướng | Kết quả | Vì sao |
+|---|---|---|
+| Reranker to hơn (gemma 2,5B) | −0.079 AUC | kích thước vô dụng; 5 ứng viên đều thua bản fine-tune |
+| Reranker chuyên tiếng Việt (ViRanker, PhoRanker) | thua | "chuyên tiếng Việt" không tự động tốt |
+| Listwise loss (`--listwise`) | −0.0050 | chỉ so trong nhóm 5, mà lúc chạy phải xếp 74 ứng viên |
+| Positive do CE chọn (`--pos-by ce`) | −0.0030 | đổi 39% nhãn mà không đổi gì — nhãn ở mức văn bản nên chọn đoạn nào cũng vậy |
+| Bi-encoder train 3 epoch | phẳng | loss giảm 45% nhưng chỉ là học thuộc; 5.999 cặp cạn sau 1 lượt |
+| Negative khó (`--skip-top 0`) | −0.005 public | hạng 1–4 chứa false negative thật |
+| Đồ thị trích dẫn giữa văn bản | tín hiệu ngược chiều | gold trượt **ít** liên kết hơn gold trúng (30% vs 44%) |
+| Từ điển khẩu ngữ (sổ đỏ → giấy chứng nhận…) | 0 | chỉ 0,8% câu chứa, và nhóm đó đã đúng 100% |
+| Gộp 3 reranker (ensemble) | +0.0060 | có ăn nhưng phải chấm 3 lần, chưa nộp |
+
+Hai hướng còn dư địa, chưa ai chạm:
+
+- **Full fine-tune bằng Adafactor** thay LoRA — xem cảnh báo ở mục 6.2
+- **Tách từ tiếng Việt cho BM25** — tách từ đáng +0.082 AUC ở tầng reranker (đo qua
+  PhoRanker), chưa ai đo ở tầng BM25
+
+---
+
 ## 8. Bảng tham số
 
 Tất cả đều đã quét và kiểm chứng trên 500–1.000 câu validation. Xem [RESULTS.md](RESULTS.md)
@@ -435,8 +500,8 @@ Tất cả đều đã quét và kiểm chứng trên 500–1.000 câu validatio
 | `alpha` | **0.7** | hybrid | 70% dense / 30% BM25. Đỉnh sạch, một đỉnh, đã kiểm chứng ba lần |
 | `ndocs` | 50 | rerank | số văn bản đưa vào cross-encoder |
 | `mchunks` | 2 | rerank | số chunk mỗi văn bản |
-| `beta` | **0.7** | rerank | 70% cross-encoder / 30% hybrid. β=1.0 (đè hẳn) luôn tệ hơn |
-| `agg` | top-2 mean | gộp | `top3` đúng cho BM25 thuần nhưng sai sau khi có dense |
+| `beta` | **0.5** | rerank | 50/50 cross-encoder và hybrid. β=1.0 (đè hẳn) luôn tệ hơn |
+| `agg` | **`max+0.4`** | gộp | chunk mạnh nhất + 0.4×chunk nhì. Xem cảnh báo dưới |
 | `lam` | 0.2 | prior | vùng 0.05–0.3 đều dương, 0.5 trở lên âm |
 
 Hai tham số cần cẩn thận:
@@ -447,6 +512,20 @@ cấu hình đã thử (−0.023 đến −0.054). Hybrid đã là xếp hạng 
 **`lam` đo được rất yếu.** Hiệu ứng khoảng +0.005, mà 500 câu validation chỉ phân giải được
 tới ~0.01. Đường cong λ nhảy loạn chứ không trơn như α. Đừng tinh chỉnh nó — để 0.2 và đi
 làm việc khác.
+
+**`agg` và `beta` phải quét lại mỗi khi đổi model.** Đây là bài học đắt nhất của dự án.
+
+Cách gộp cũ là `top-2 mean`, và RESULTS.md từng ghi *"top2 thắng ở 24/24 ô lưới"* — đúng ở
+thời điểm đó, khi reranker **chưa** fine-tune. Điểm của nó nhiễu nên lấy trung bình hai
+chunk giúp **giảm phương sai**. Sau khi fine-tune, reranker đủ chính xác để tin chunk mạnh
+nhất, và lấy trung bình lại **thêm nhiễu** từ chunk thứ hai. Đổi sang `max+0.4` được
+**+0.0142 trên public** — bước nhảy lớn nhất của cả dự án, mà không tốn thêm một giây GPU.
+
+Quy tắc: *bộ chấm càng đáng tin thì càng nên nghe tín hiệu mạnh nhất của nó; bộ chấm càng
+nhiễu thì càng nên lấy trung bình.*
+
+Tương tự với β: nó được chỉnh khi bi-encoder còn yếu. Bi-encoder mạnh lên thì hybrid đáng
+tin hơn và β tối ưu **giảm** — từ 0.7 xuống 0.5.
 
 ---
 
@@ -466,7 +545,8 @@ Retrieval-LegalIR/
   encode.py                   trích vector → memmap (tự dò pooling)
   hybrid.py                   hoà điểm BM25 + dense
   rerank.py                   tầng cross-encoder
-  prior.py                    prior độ phổ biến + sinh bài nộp  ← đường sản xuất
+  prior.py                    prior + sinh bài nộp  ← đường sản xuất
+                              cờ: --emb --alpha --beta --agg --reranker --limit
   predict.py                  sinh bài nộp không có prior
   serve.py                    giao diện web tra cứu
   ce_bench.py                 so sánh nhiều cross-encoder
@@ -491,7 +571,7 @@ Validator-Task-LegalIR/
 |---|---:|---|---:|
 | `Chunking-LegalIR/chunks.jsonl` | 592 MB | `chunker.py` | 1m31s |
 | `Retrieval-LegalIR/index/` | 286 MB | `bm25.py build` | 202s |
-| `Retrieval-LegalIR/emb_v2/` | 952 MB | `encode.py` | 112 phút |
+| `Retrieval-LegalIR/emb_v2ft/` | 952 MB | `encode.py` | 112 phút |
 | `Finetune-LegalIR/data/pairs.jsonl` | 49 MB | `mine_data.py` | 6 phút |
 | `Finetune-LegalIR/models/` | ~2,3 GB/model | `train*.py` | 11–51 phút |
 
@@ -566,10 +646,12 @@ có hằng số `BASE` trỏ tới tên thư mục dữ liệu cụ thể trên 
 đó, hoặc đặt tên thư mục dữ liệu y hệt. Nên tham số hoá, chưa làm.
 
 **`run_all.py` chưa bao phủ tầng cross-encoder và prior**, nên nó dừng ở ~0.86 trong khi
-đường thủ công đạt 0.9277.
+đường thủ công đạt 0.9456.
 
 **Positive lúc đào dữ liệu là giám sát yếu** — chọn chunk có điểm hybrid cao nhất trong văn
 bản gold, tức model học đồng ý với chính nó. Có thể là nguyên nhân khiến cross-encoder chỉ
 xếp chunk gold ở phân vị 0.833 thay vì cao nhất.
 
-**`train.py` chưa hỗ trợ LoRA**, nên không fine-tune được model 568M trên GPU 6 GB.
+**Cả hai model đang chạy đều chỉ LoRA** — bi-encoder train 0,41% tham số, cross-encoder
+1,41%. Hơn 98% trọng số vẫn nguyên như lúc tải về. Full fine-tune 568M cần Adafactor thay
+AdamW, chưa ai làm.

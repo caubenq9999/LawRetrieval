@@ -55,6 +55,15 @@ def main():
                         'cao nhat - chinh la nhom dang danh bai reranker hien tai.')
     p.add_argument('--neg', type=int, default=N_NEG, help='So hard negative moi cau')
     p.add_argument('--neg-until', type=int, default=NEG_UNTIL)
+    p.add_argument('--pos-by', default='hybrid', choices=['hybrid', 'ce'],
+                   help="Cach chon positive trong van ban gold. 'hybrid' = chunk co "
+                        "diem hybrid cao nhat (model tu dong y voi chinh no). 'ce' = "
+                        "cho cross-encoder cham lai TOP-N chunk hybrid roi chon - y "
+                        "kien doc lap hon. Do tren 200 van ban: hai cach chon cung "
+                        "chunk 64.5%% so lan.")
+    p.add_argument('--pos-topn', type=int, default=5,
+                   help='So chunk hybrid dan dau dua cho CE cham lai')
+    p.add_argument('--reranker', default='models/reranker-ft')
     args = p.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -72,7 +81,15 @@ def main():
         json.dump({'train': trn_ids, 'val': sorted(val_ids), 'seed': SPLIT_SEED}, f)
 
     h = Hybrid(args.index, args.emb, k1=args.k1, b=args.b)
+    rr = None
+    if args.pos_by == 'ce':
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                        '..', 'Retrieval-LegalIR'))
+        from rerank import Reranker
+        rr = Reranker(args.reranker, batch=16)
     print(f'Dao bang: {args.emb} | query encoder {h.qmodel}')
+    print(f'Positive: {args.pos_by}' + (f' (CE cham lai {args.pos_topn} chunk dau)'
+                                        if rr else ''))
     print(f'Negative: hang {args.skip_top}-{args.neg_until}, toi da {args.neg} moi cau')
 
     rows = []
@@ -90,11 +107,12 @@ def main():
         rank = np.argsort(-fused)
 
         # positive: chunk diem cao nhat thuoc van ban gold
-        pos_ci = None
-        for j in rank:
-            if int(h.bm25.chunk_doc[order[j]]) in gold:
-                pos_ci = int(order[j])
-                break
+        gold_cis = [int(order[j]) for j in rank
+                    if int(h.bm25.chunk_doc[order[j]]) in gold][:args.pos_topn]
+        pos_ci = gold_cis[0] if gold_cis else None
+        if rr is not None and len(gold_cis) > 1:
+            txt = [h.bm25.read_chunk(c)['text'] for c in gold_cis]
+            pos_ci = gold_cis[int(np.argmax(rr.score(q, txt)))]
         if pos_ci is None:
             # gold khong co chunk nao trong pool -> lay chunk dau tien cua van ban gold
             cand = np.flatnonzero(np.isin(h.bm25.chunk_doc, list(gold)))
