@@ -54,6 +54,8 @@ def cmd_pairs(args):
     val = val[args.offset:args.offset + args.n] if args.n else val[args.offset:]
     print(f'{len(val)} cau validation')
 
+    CFG['mchunks'], CFG['ndocs'] = args.mchunks, args.ndocs
+    print(f"  ndocs={CFG['ndocs']} mchunks={CFG['mchunks']}")
     h = Hybrid('index', args.emb, k1=CFG['k1'], b=CFG['b'])
     texts = [train[q]['question'] for q in val]
     qvecs = np.concatenate([h.encode_query(texts[i:i + 64])
@@ -346,6 +348,9 @@ def main():
 
     a = sub.add_parser('pairs')
     a.add_argument('-n', type=int, default=500)
+    a.add_argument('--mchunks', type=int, default=CFG['mchunks'],
+                   help='So chunk moi van ban dua cho cross-encoder. Duoc chon khi cach gop con la top-2 mean; voi gop kieu max thi them chunk = them co hoi tim dung doan, ma chunk thua khong bi phat.')
+    a.add_argument('--ndocs', type=int, default=CFG['ndocs'])
     a.add_argument('--offset', type=int, default=0,
                    help='Bo qua N cau dau. --offset 500 lay nua SAU cua tap validation, phan chua tung dung de chon tham so.')
     a.add_argument('--emb', default='emb_ft')
