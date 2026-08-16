@@ -1,13 +1,77 @@
-# DSC 2026 — Task 1: Legal Information Retrieval
+# DSC 2026 — LegalIR và LegalQA
 
-Hệ thống truy xuất văn bản pháp luật tiếng Việt. Cho một câu hỏi, trả về **5 văn bản**
-có khả năng chứa câu trả lời nhất.
+Mã nguồn cho hai bài toán UIT DSC 2026:
 
-**Public leaderboard: Recall@5 = 0.8637**
+- **Task 1 — LegalIR:** truy xuất 5 văn bản có khả năng chứa câu trả lời nhất.
+- **Task 2 — LegalQA:** baseline trích xuất 3 chunk và dựng câu trả lời có căn cứ.
+
+**Task 1 public leaderboard: Recall@5 = 0.9456**
 
 ---
 
-## Chạy
+## Task 2 — baseline `3 chunk + cite`
+
+Baseline ở [`Retrieval-LegalIR/qa_predict.py`](Retrieval-LegalIR/qa_predict.py) không
+dùng LLM sinh tự do. Pipeline dùng lại index và model của Task 1, lấy ba chunk mạnh
+nhất, chép nguyên văn và thêm khung `Căn cứ Điều ... quy định như sau:`.
+
+Lý do: với tiếng Việt, METEOR trong bộ chấm chủ yếu thưởng token trùng với đáp án.
+Trên dữ liệu train, gần như toàn bộ từ của đáp án tham chiếu đã xuất hiện trong văn
+bản nguồn; diễn giải lại bằng LLM dễ làm mất điểm.
+
+| Cấu hình | METEOR | ROUGE-L |
+|---|---:|---:|
+| 3 chunk + `cite`, 200 câu train | 0.5281 | 0.4631 |
+| **3 chunk + `cite`, public** | **0.5104** | **0.4618** |
+
+### Sản phẩm cần có
+
+Repo không chứa dữ liệu BTC, vector, index hoặc trọng số fine-tune. Trước khi chạy,
+cần có:
+
+```text
+LegalIR - Public Test-20260806T081424Z-1-001/QA/
+  train.json                         # chỉ cần khi --eval
+  public-official.json
+  selected-contexts/context_*.json
+
+Retrieval-LegalIR/
+  index/                             # BM25 index của corpus 8.532 văn bản
+  emb_v2ft/                          # vector chunk + meta.json
+
+Finetune-LegalIR/models/
+  v2-ft/                             # bi-encoder dùng để encode query
+  reranker-ft-fp16/                  # cross-encoder
+```
+
+Corpus Task 2 trùng 8.532/8.532 văn bản với Task 1, nên có thể dùng lại `chunks`,
+`index` và vector. Xem [`RUNNING.md`](RUNNING.md) mục 5–6 để dựng các sản phẩm này.
+
+### Đánh giá và sinh bài nộp
+
+```bash
+pip install -r requirements.txt
+cd Retrieval-LegalIR
+
+# Quét 1–4 chunk và cite/raw trong một lượt retrieval trên 200 câu
+python qa_predict.py --eval -n 200 --sweep
+
+# Cấu hình public baseline: mặc định --nchunk 3 --style cite
+python qa_predict.py \
+  --questions "../LegalIR - Public Test-20260806T081424Z-1-001/QA/public-official.json" \
+  --out submission_qa
+```
+
+Kết quả là `submission_qa.json` và `submission_qa.zip`; bên trong zip chỉ có
+`submission.json` ở thư mục gốc. Có thể đổi vị trí dữ liệu bằng `--qa-dir`, index bằng
+`--index`, vector bằng `--emb`, và reranker bằng `--reranker`.
+
+Các thử nghiệm tăng lên 4 chunk (`0.4954` public) và lọc Khoản theo ngân sách
+(`0.5085` public) đều thua baseline, nên không nằm trong code của nhánh này.
+
+---
+
+## Task 1 — chạy pipeline
 
 ```bash
 pip install -r requirements.txt
@@ -82,8 +146,8 @@ python run_all.py --data "..." --force                        # làm lại từ 
 | Dense thuần | 0.8307 |
 | **Hybrid (đang dùng)** | **0.8633** |
 
-*Đo trên 1.000 câu validation tách riêng từ `train.json`. Con số 0.8633 khớp gần như
-tuyệt đối với public leaderboard 0.8637 — tập validation này là proxy đáng tin.*
+*Đo trên 1.000 câu validation tách riêng từ `train.json`. Đây là kết quả của cấu hình
+hybrid ban đầu; pipeline Task 1 hiện tại đã đạt Recall@5 = 0.9456 trên public leaderboard.*
 
 ### 1. Chunking 3 tầng
 

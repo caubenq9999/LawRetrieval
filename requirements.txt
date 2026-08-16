@@ -4,10 +4,14 @@ numpy>=1.24
 torch>=2.0
 transformers>=4.40
 
+# Task 2: chi dung khi --eval/--sweep de tinh metric
+nltk>=3.8
+rouge-score>=0.1.2
+
 # torch: cai ban CUDA neu co GPU (buoc trich vector nhanh hon rat nhieu):
 #   pip install torch --index-url https://download.pytorch.org/whl/cu124
 # Khong co GPU van chay duoc, chi la buoc encode se rat lau.
 
-# --- Tuy chon: chi can khi bat cross-encoder rerank (rerank.py) ---
-# sentencepiece
-# protobuf
+# --- Cross-encoder rerank (Task 1 tuy chon, Task 2 bat buoc) ---
+sentencepiece>=0.2
+protobuf>=4.25

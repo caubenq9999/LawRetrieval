@@ -2,6 +2,8 @@
 LegalIR - Public Test*/
 *.zip
 !Retrieval-LegalIR/submission*.zip
+# Submission Task 2 la artifact local, khong commit vao nhanh baseline.
+Retrieval-LegalIR/submission_qa*.zip
 
 # ---- San pham trung gian: deu tai tao duoc, tong ~1.7 GB ----------------
 # chunks.jsonl        592 MB  <- chunker.py,  1m31s
