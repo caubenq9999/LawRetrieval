@@ -9,68 +9,6 @@ Mã nguồn cho hai bài toán UIT DSC 2026:
 
 ---
 
-## Task 2 — baseline `3 chunk + cite`
-
-Baseline ở [`Retrieval-LegalIR/qa_predict.py`](Retrieval-LegalIR/qa_predict.py) không
-dùng LLM sinh tự do. Pipeline dùng lại index và model của Task 1, lấy ba chunk mạnh
-nhất, chép nguyên văn và thêm khung `Căn cứ Điều ... quy định như sau:`.
-
-Lý do: với tiếng Việt, METEOR trong bộ chấm chủ yếu thưởng token trùng với đáp án.
-Trên dữ liệu train, gần như toàn bộ từ của đáp án tham chiếu đã xuất hiện trong văn
-bản nguồn; diễn giải lại bằng LLM dễ làm mất điểm.
-
-| Cấu hình | METEOR | ROUGE-L |
-|---|---:|---:|
-| 3 chunk + `cite`, 200 câu train | 0.5281 | 0.4631 |
-| **3 chunk + `cite`, public** | **0.5104** | **0.4618** |
-
-### Sản phẩm cần có
-
-Repo không chứa dữ liệu BTC, vector, index hoặc trọng số fine-tune. Trước khi chạy,
-cần có:
-
-```text
-LegalIR - Public Test-20260806T081424Z-1-001/QA/
-  train.json                         # chỉ cần khi --eval
-  public-official.json
-  selected-contexts/context_*.json
-
-Retrieval-LegalIR/
-  index/                             # BM25 index của corpus 8.532 văn bản
-  emb_v2ft/                          # vector chunk + meta.json
-
-Finetune-LegalIR/models/
-  v2-ft/                             # bi-encoder dùng để encode query
-  reranker-ft-fp16/                  # cross-encoder
-```
-
-Corpus Task 2 trùng 8.532/8.532 văn bản với Task 1, nên có thể dùng lại `chunks`,
-`index` và vector. Xem [`RUNNING.md`](RUNNING.md) mục 5–6 để dựng các sản phẩm này.
-
-### Đánh giá và sinh bài nộp
-
-```bash
-pip install -r requirements.txt
-cd Retrieval-LegalIR
-
-# Quét 1–4 chunk và cite/raw trong một lượt retrieval trên 200 câu
-python qa_predict.py --eval -n 200 --sweep
-
-# Cấu hình public baseline: mặc định --nchunk 3 --style cite
-python qa_predict.py \
-  --questions "../LegalIR - Public Test-20260806T081424Z-1-001/QA/public-official.json" \
-  --out submission_qa
-```
-
-Kết quả là `submission_qa.json` và `submission_qa.zip`; bên trong zip chỉ có
-`submission.json` ở thư mục gốc. Có thể đổi vị trí dữ liệu bằng `--qa-dir`, index bằng
-`--index`, vector bằng `--emb`, và reranker bằng `--reranker`.
-
-Các thử nghiệm tăng lên 4 chunk (`0.4954` public) và lọc Khoản theo ngân sách
-(`0.5085` public) đều thua baseline, nên không nằm trong code của nhánh này.
-
----
-
 ## Task 1 — chạy pipeline
 
 ```bash
@@ -349,3 +287,79 @@ trên train.
 2. **Từ điển viết tắt** phía query — rẻ, đo được trong 10 phút.
 3. **Word segmentation + bigram cho BM25** — "mức lương cơ sở" đang bị xé thành 4 âm tiết rời.
 4. **Bật lại cross-encoder** với `ndocs=50`.
+
+---
+
+## Task 2 — LegalQA độc lập
+
+Baseline ở [`Retrieval-LegalIR/qa_predict.py`](Retrieval-LegalIR/qa_predict.py) không
+dùng LLM sinh tự do. Pipeline truy xuất các chunk mạnh nhất, chép nguyên văn và thêm
+khung `Căn cứ Điều ... quy định như sau:`.
+
+Lý do: với tiếng Việt, METEOR trong bộ chấm chủ yếu thưởng token trùng với đáp án.
+Trên dữ liệu train, gần như toàn bộ từ của đáp án tham chiếu đã xuất hiện trong văn
+bản nguồn; diễn giải lại bằng LLM dễ làm mất điểm.
+
+> **Quy định tách task:** không dùng dữ liệu, index, embedding hoặc checkpoint đã train
+> bằng Task 1 cho Task 2. Baseline cũ từng dùng `emb_v2ft` và reranker Task 1 đã được
+> loại bỏ; các điểm public cũ không còn được xem là kết quả hợp lệ của pipeline này.
+
+Luồng baseline sạch:
+
+```text
+QA/selected-contexts
+  -> chunks_qa.jsonl
+  -> index_qa (BM25)
+  -> top chunk
+  -> câu trả lời extractive + citation
+```
+
+Notebook Colab chạy toàn bộ luồng và cache artifact trên Google Drive:
+[`COLAB_TASK2_QA.ipynb`](COLAB_TASK2_QA.ipynb).
+
+### Sản phẩm cần có
+
+Repo không chứa dữ liệu BTC hoặc artifact sinh từ dữ liệu. Baseline BM25 cần:
+
+```text
+LegalIR - Public Test-20260806T081424Z-1-001/QA/
+  train.json
+  public-official.json
+  selected-contexts/context_*.json
+
+Chunking-LegalIR/chunks_qa.jsonl      # tạo riêng từ QA contexts
+Retrieval-LegalIR/index_qa/           # tạo riêng từ chunks_qa
+```
+
+Dense retrieval là tùy chọn. Nếu bật, dùng model pretrained zero-shot hoặc checkpoint
+chỉ học từ Task 2 để tạo `emb_qa_*`; tuyệt đối không dùng `emb_v2ft`, `v2-ft` hoặc
+reranker đã học từ Task 1.
+
+### Đánh giá và sinh bài nộp
+
+```bash
+pip install -r requirements.txt
+
+# Dựng artifact chỉ từ corpus Task 2
+python Chunking-LegalIR/chunker.py \
+  --contexts "LegalIR - Public Test-20260806T081424Z-1-001/QA/selected-contexts" \
+  --out Chunking-LegalIR/chunks_qa.jsonl
+
+python Retrieval-LegalIR/bm25.py build \
+  --chunks Chunking-LegalIR/chunks_qa.jsonl \
+  --index Retrieval-LegalIR/index_qa
+
+# Quét 1–4 chunk và cite/raw trong một lượt retrieval trên 200 câu
+python Retrieval-LegalIR/qa_predict.py \
+  --retriever bm25 --eval -n 200 --sweep
+
+# Sinh public submission sau khi chọn nchunk/style trên validation
+python Retrieval-LegalIR/qa_predict.py \
+  --retriever bm25 \
+  --questions "LegalIR - Public Test-20260806T081424Z-1-001/QA/public-official.json" \
+  --out submission_qa
+```
+
+Kết quả là `submission_qa.json` và `submission_qa.zip`; bên trong zip chỉ có
+`submission.json` ở thư mục gốc. Có thể đổi dữ liệu bằng `--qa-dir`, index bằng
+`--index`; chế độ `--retriever hybrid` cần thêm embedding Task 2 qua `--emb`.

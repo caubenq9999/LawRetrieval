@@ -1,6 +1,7 @@
 # ---- Du lieu cua BTC (khong phat tan lai) -------------------------------
 LegalIR - Public Test*/
 *.zip
+*.safetensors
 !Retrieval-LegalIR/submission*.zip
 # Submission Task 2 la artifact local, khong commit vao nhanh baseline.
 Retrieval-LegalIR/submission_qa*.zip

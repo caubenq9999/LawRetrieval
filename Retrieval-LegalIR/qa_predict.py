@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""DSC 2026 Task 2 (LegalQA) — extractive 3-chunk baseline.
+"""DSC 2026 Task 2 (LegalQA) — standalone extractive baseline.
 
 The official metric rewards lexical overlap. This baseline therefore retrieves
 legal chunks, copies them verbatim, and adds a deterministic citation header;
 it does not use a generative LLM.
 
+Competition rule: Task 1 and Task 2 data must not be mixed. Build index_qa and
+emb_qa_v2 only from QA/selected-contexts. Do not pass a model fine-tuned on
+Task 1 as --emb or --reranker.
+
 Examples (run from Retrieval-LegalIR):
 
-    python qa_predict.py --eval -n 200 --sweep
+    python qa_predict.py --eval -n 200 --sweep --retriever bm25
+    python qa_predict.py --eval -n 200 --sweep --retriever hybrid
     python qa_predict.py --questions "../LegalIR - Public Test-.../QA/public-official.json" \
         --out submission_qa
 """
@@ -26,13 +31,11 @@ import numpy as np
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RETRIEVAL_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_QA_DIR = os.path.join(
     ROOT, 'LegalIR - Public Test-20260806T081424Z-1-001', 'QA')
-DEFAULT_RERANKER = os.path.join(
-    ROOT, 'Finetune-LegalIR', 'models', 'reranker-ft-fp16')
-
-CFG = dict(k1=2.5, b=0.9, pool=2000, alpha=0.7,
-           beta=0.5, ndocs=20, mchunks=3)
+DEFAULT_INDEX = os.path.join(RETRIEVAL_DIR, 'index_qa')
+DEFAULT_EMB = os.path.join(RETRIEVAL_DIR, 'emb_qa_v2')
 
 RE_SLUG = re.compile(
     r'(?<!\d)(\d{1,4})-(\d{4})-([A-Z][A-Z0-9\-]{1,12}?)(?=-[a-z]|-\d|$)')
@@ -118,8 +121,8 @@ def score_task2(gold, predictions):
             rouge_l.append(0.0)
             continue
         meteor.append(meteor_score(
-            [word_tokenize(reference.lower())],
-            word_tokenize(prediction.lower())))
+            [word_tokenize(reference.lower(), preserve_line=True)],
+            word_tokenize(prediction.lower(), preserve_line=True)))
         rouge_l.append(scorer.score(reference, prediction)['rougeL'].fmeasure)
     return {'meteor': float(np.mean(meteor)),
             'rougeL': float(np.mean(rouge_l))}
@@ -127,9 +130,15 @@ def score_task2(gold, predictions):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--index', default='index')
-    parser.add_argument('--emb', default='emb_v2ft')
-    parser.add_argument('--reranker', default=DEFAULT_RERANKER)
+    parser.add_argument('--retriever', default='bm25',
+                        choices=['bm25', 'hybrid'],
+                        help='BM25 needs no model; hybrid also uses --emb')
+    parser.add_argument('--index', default=DEFAULT_INDEX,
+                        help='Task 2 BM25 index built from QA contexts')
+    parser.add_argument('--emb', default=DEFAULT_EMB,
+                        help='Task 2 embedding directory (hybrid only)')
+    parser.add_argument('--reranker',
+                        help='Optional external or Task-2-only cross-encoder')
     parser.add_argument('--qa-dir', default=DEFAULT_QA_DIR)
     parser.add_argument('--questions', help='Public/private question JSON')
     parser.add_argument('--out', default='submission_qa')
@@ -144,7 +153,30 @@ def parse_args():
     parser.add_argument('--style', default='cite', choices=['cite', 'raw'])
     parser.add_argument('--sweep', action='store_true',
                         help='Evaluate 1-4 chunks and both answer styles in one run')
+    parser.add_argument('--k1', type=float, default=1.5)
+    parser.add_argument('--b', type=float, default=0.75)
+    parser.add_argument('--pool', type=int, default=2000)
+    parser.add_argument('--alpha', type=float, default=0.5,
+                        help='Dense weight for hybrid retrieval')
+    parser.add_argument('--beta', type=float, default=0.5,
+                        help='Reranker weight when --reranker is supplied')
+    parser.add_argument('--ndocs', type=int, default=20,
+                        help='Number of first-stage documents sent to reranking')
+    parser.add_argument('--mchunks', type=int, default=3,
+                        help='Maximum candidate chunks per document')
+    parser.add_argument('--batch', type=int, default=16,
+                        help='Optional reranker batch size')
     return parser.parse_args()
+
+
+def bm25_chunk_scores(bm25, query, pool):
+    """Return ranked non-zero BM25 chunk IDs and their scores."""
+    scores, _ = bm25.score(query)
+    order = np.flatnonzero(scores)
+    if order.size > pool:
+        order = order[np.argpartition(-scores[order], pool - 1)[:pool]]
+    order = order[np.argsort(-scores[order])]
+    return order, scores[order]
 
 
 def main():
@@ -152,10 +184,9 @@ def main():
     if not args.eval and not args.questions:
         raise SystemExit('Provide --questions, or use --eval.')
 
-    from hybrid import Hybrid
-    from rerank import Reranker
-
     context_dir = os.path.join(args.qa_dir, 'selected-contexts')
+    if not os.path.isdir(context_dir):
+        raise SystemExit(f'Task 2 contexts not found: {context_dir}')
     print('Building citation table ...', flush=True)
     citations = build_citation_map(context_dir)
     print(f'  {len(citations)} documents have a legal reference')
@@ -170,24 +201,50 @@ def main():
         questions = [(key, value['question']) for key, value in data.items()]
         gold = None
 
-    reranker = Reranker(args.reranker, batch=16)
-    hybrid = Hybrid(args.index, args.emb, k1=CFG['k1'], b=CFG['b'])
-    print(f'{len(questions)} questions | dense={args.emb} | '
-          f'ndocs={CFG["ndocs"]} mchunks={CFG["mchunks"]}')
+    if not os.path.isdir(args.index):
+        raise SystemExit(
+            f'Task 2 index not found: {args.index}\n'
+            'Build index_qa from QA/selected-contexts before prediction.')
 
-    texts = [question for _, question in questions]
-    query_vectors = np.concatenate([
-        hybrid.encode_query(texts[start:start + 64])
-        for start in range(0, len(texts), 64)
-    ])
+    if args.retriever == 'hybrid':
+        if not os.path.isdir(args.emb):
+            raise SystemExit(
+                f'Task 2 embeddings not found: {args.emb}\n'
+                'Build emb_qa_v2 from QA chunks, or use --retriever bm25.')
+        from hybrid import Hybrid
+        retriever = Hybrid(args.index, args.emb, k1=args.k1, b=args.b)
+        bm25 = retriever.bm25
+        texts = [question for _, question in questions]
+        query_vectors = np.concatenate([
+            retriever.encode_query(texts[start:start + 64])
+            for start in range(0, len(texts), 64)
+        ]) if texts else np.empty((0, retriever.dim), dtype=np.float32)
+    else:
+        from bm25 import BM25Index
+        retriever = None
+        bm25 = BM25Index(args.index, k1=args.k1, b=args.b)
+        query_vectors = None
+
+    reranker = None
+    if args.reranker:
+        from rerank import Reranker
+        reranker = Reranker(args.reranker, batch=args.batch)
+
+    print(f'{len(questions)} questions | retriever={args.retriever} | '
+          f'reranker={args.reranker or "none"} | '
+          f'ndocs={args.ndocs} mchunks={args.mchunks}')
 
     predictions, candidates_by_question = {}, {}
     started = time.time()
     keep_top = max(args.nchunk, 4 if args.sweep else args.nchunk)
 
     for index, (question_id, question) in enumerate(questions):
-        order, fused = hybrid.fused_chunk_scores(
-            question, CFG['pool'], 'linear', CFG['alpha'], query_vectors[index])
+        if retriever is None:
+            order, fused = bm25_chunk_scores(bm25, question, args.pool)
+        else:
+            order, fused = retriever.fused_chunk_scores(
+                question, args.pool, 'linear', args.alpha,
+                query_vectors[index])
         if order.size == 0:
             candidates_by_question[question_id] = []
             predictions[question_id] = build_answer([], citations, args.style)
@@ -196,33 +253,36 @@ def main():
         per_document, hybrid_scores = {}, {}
         for position in np.argsort(-fused):
             chunk_index = int(order[position])
-            doc_id = int(hybrid.bm25.chunk_doc[chunk_index])
+            doc_id = int(bm25.chunk_doc[chunk_index])
             per_document.setdefault(doc_id, []).append(chunk_index)
             hybrid_scores[chunk_index] = float(fused[position])
-            if len(per_document) > CFG['ndocs'] and len(per_document[doc_id]) == 1:
+            if len(per_document) > args.ndocs and len(per_document[doc_id]) == 1:
                 per_document.pop(doc_id)
                 break
 
         pairs = [
             (doc_id, chunk_index)
             for doc_id, chunk_indices in per_document.items()
-            for chunk_index in chunk_indices[:CFG['mchunks']]
+            for chunk_index in chunk_indices[:args.mchunks]
         ]
-        candidate_texts = [
-            hybrid.bm25.read_chunk(chunk_index)['text']
-            for _, chunk_index in pairs
-        ]
-        ce_scores = reranker.score(question, candidate_texts)
         first_stage = np.array([
             hybrid_scores[chunk_index] for _, chunk_index in pairs
-        ])
-        scores = (CFG['beta'] * minmax(ce_scores)
-                  + (1 - CFG['beta']) * minmax(first_stage))
+        ], dtype=np.float32)
+        if reranker is None:
+            scores = first_stage
+        else:
+            candidate_texts = [
+                bm25.read_chunk(chunk_index)['text']
+                for _, chunk_index in pairs
+            ]
+            ce_scores = reranker.score(question, candidate_texts)
+            scores = (args.beta * minmax(ce_scores)
+                      + (1 - args.beta) * minmax(first_stage))
 
         selected = []
         for position in np.argsort(-scores)[:keep_top]:
             doc_id, chunk_index = pairs[position]
-            chunk = hybrid.bm25.read_chunk(chunk_index)
+            chunk = bm25.read_chunk(chunk_index)
             selected.append((str(doc_id), chunk['path'], chunk['text']))
 
         candidates_by_question[question_id] = selected
