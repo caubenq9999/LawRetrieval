@@ -142,6 +142,8 @@ def parse_args():
     parser.add_argument('--qa-dir', default=DEFAULT_QA_DIR)
     parser.add_argument('--questions', help='Public/private question JSON')
     parser.add_argument('--out', default='submission_qa')
+    parser.add_argument('--candidates-out',
+                        help='Optional JSON containing questions and selected chunks')
     parser.add_argument('--eval', action='store_true',
                         help='Evaluate against train.json in --qa-dir')
     parser.add_argument('-n', type=int, default=200,
@@ -294,6 +296,28 @@ def main():
             remaining = elapsed / (index + 1) * (len(questions) - index - 1) / 60
             print(f'  {index + 1}/{len(questions)} '
                   f'({elapsed:.0f}s, ~{remaining:.0f}m remaining)', flush=True)
+
+    if args.candidates_out:
+        question_map = dict(questions)
+        candidate_payload = {}
+        for key, selected in candidates_by_question.items():
+            row = {
+                'question': question_map[key],
+                'chunks': [
+                    {'doc_id': doc_id, 'path': path, 'text': text}
+                    for doc_id, path, text in selected[:args.nchunk]
+                ],
+                'rule_answer': build_answer(
+                    selected[:args.nchunk], citations, args.style),
+            }
+            if gold is not None:
+                row['gold_answer'] = gold[key]
+            candidate_payload[key] = row
+        os.makedirs(os.path.dirname(os.path.abspath(args.candidates_out)),
+                    exist_ok=True)
+        with io.open(args.candidates_out, 'w', encoding='utf-8') as stream:
+            json.dump(candidate_payload, stream, ensure_ascii=False)
+        print(f'Candidates -> {args.candidates_out}', flush=True)
 
     if gold and args.sweep:
         print(f'\n=== Sweep on {len(questions)} training questions ===')
