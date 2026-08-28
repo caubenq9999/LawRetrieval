@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-DSC 2026 - Task 1: LegalIR
-Fine-tune cross-encoder (tang 3) bang LoRA.
+DSC 2026 - LegalIR / LegalQA
+Fine-tune cross-encoder (tang 3) bang LoRA hoac full fine-tune.
 
 VI SAO PHAI DUNG LoRA
   Cross-encoder la xlm-roberta-LARGE, 568M tham so. Full fine-tune can:
@@ -123,6 +123,8 @@ def build_dataset(path, n_neg, listwise, limit=0):
 
 def main():
     p = argparse.ArgumentParser()
+    p.add_argument('--base', default=BASE_MODEL,
+                   help='Cross-encoder goc; Task 2 khong duoc dung checkpoint Task 1')
     p.add_argument('--data', '-d', default='data/pairs.jsonl')
     p.add_argument('--out', '-o', default='models/reranker-ft')
     p.add_argument('--log', default='logs/train_ce.log')
@@ -134,6 +136,14 @@ def main():
     p.add_argument('--warmup', type=float, default=0.1)
     p.add_argument('--accum', type=int, default=4)
     p.add_argument('--rank', type=int, default=16)
+    p.add_argument('--full', action='store_true',
+                   help='Fine-tune toan bo model; chi nen dung GPU >= 48 GB')
+    p.add_argument('--precision', default='fp16',
+                   choices=['fp16', 'bf16', 'fp32'])
+    p.add_argument('--no-checkpointing', action='store_true',
+                   help='Tat gradient checkpointing de tang toc khi du VRAM')
+    p.add_argument('--workers', type=int, default=0)
+    p.add_argument('--optim', default='adamw_torch_fused')
     p.add_argument('--listwise', action='store_true',
                    help='Dung CachedMultipleNegativesRankingLoss thay vi BCE')
     p.add_argument('--smoke', action='store_true')
@@ -141,7 +151,7 @@ def main():
 
     setup_logging(args.log)
     log.info('=' * 68)
-    log.info('FINE-TUNE CROSS-ENCODER (LoRA) - DSC 2026 Task 1')
+    log.info('FINE-TUNE CROSS-ENCODER (LoRA) - DSC 2026')
     log.info('=' * 68)
     if torch.cuda.is_available():
         log.info(f'GPU: {torch.cuda.get_device_name(0)} '
@@ -151,26 +161,31 @@ def main():
                        limit=300 if args.smoke else 0)
     log.info(f'Du lieu: {len(ds)} dong | cot {ds.column_names}')
 
-    log.info(f'Nap model goc: {BASE_MODEL}')
-    model = CrossEncoder(BASE_MODEL, num_labels=1, max_length=args.maxlen)
+    log.info(f'Nap model goc: {args.base}')
+    model = CrossEncoder(args.base, num_labels=1, max_length=args.maxlen)
 
-    lora = LoraConfig(r=args.rank, lora_alpha=args.rank * 2, lora_dropout=0.05,
-                      target_modules=LORA_TARGETS, bias='none')
-    # inject_adapter_in_model gan LoRA TAI CHO, giu nguyen class va chu ky forward.
-    # get_peft_model se boc bang PeftModelForSequenceClassification, ma lop boc do
-    # doi chu ky forward -> sentence-transformers goi vao la vo.
-    inject_adapter_in_model(lora, model.model)
-    for name, prm in model.model.named_parameters():
-        prm.requires_grad = ('lora_' in name) or ('classifier' in name)
+    if args.full:
+        for prm in model.model.parameters():
+            prm.requires_grad = True
+        log.info('Che do: FULL FINE-TUNE')
+    else:
+        lora = LoraConfig(r=args.rank, lora_alpha=args.rank * 2, lora_dropout=0.05,
+                          target_modules=LORA_TARGETS, bias='none')
+        # inject_adapter_in_model gan LoRA TAI CHO, giu nguyen class va forward.
+        inject_adapter_in_model(lora, model.model)
+        for name, prm in model.model.named_parameters():
+            prm.requires_grad = ('lora_' in name) or ('classifier' in name)
+        log.info(f'Che do: LoRA r={args.rank} tren {LORA_TARGETS}')
 
-    # bat buoc voi 6.4 GB VRAM: doi thoi gian lay bo nho
-    model.model.enable_input_require_grads()
-    model.model.gradient_checkpointing_enable(
-        gradient_checkpointing_kwargs={'use_reentrant': False})
-    log.info('Da bat gradient checkpointing')
+    if not args.no_checkpointing:
+        model.model.enable_input_require_grads()
+        model.model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={'use_reentrant': False})
+        log.info('Da bat gradient checkpointing')
+    else:
+        log.info('Gradient checkpointing: TAT (nhanh hon, ton VRAM hon)')
     trainable = sum(p_.numel() for p_ in model.model.parameters() if p_.requires_grad)
     total = sum(p_.numel() for p_ in model.model.parameters())
-    log.info(f'LoRA r={args.rank} tren {LORA_TARGETS}')
     log.info(f'  train {trainable/1e6:.1f}M / {total/1e6:.0f}M tham so '
              f'({100*trainable/total:.2f}%)')
 
@@ -193,12 +208,15 @@ def main():
         gradient_accumulation_steps=args.accum,
         learning_rate=args.lr,
         warmup_ratio=args.warmup,
-        fp16=True,
+        fp16=args.precision == 'fp16',
+        bf16=args.precision == 'bf16',
+        tf32=torch.cuda.is_available(),
+        optim=args.optim,
         max_steps=30 if args.smoke else -1,
         logging_steps=5 if args.smoke else 20,
         save_strategy='no',
         report_to=[],
-        dataloader_num_workers=0,
+        dataloader_num_workers=args.workers,
         disable_tqdm=True,
     )
 
@@ -208,7 +226,7 @@ def main():
     try:
         trainer.train()
     except torch.cuda.OutOfMemoryError:
-        log.error('HET VRAM. Thu --batch 4 --accum 4, hoac --maxlen 256.')
+        log.error('HET VRAM. Giam --batch, bat checkpointing, hoac giam --maxlen.')
         raise
     el = time.time() - t0
     peak = torch.cuda.max_memory_allocated() / 1e9 if torch.cuda.is_available() else 0
@@ -222,9 +240,10 @@ def main():
         log.info('Smoke test xong, KHONG luu model.')
         return 0
 
-    # gop LoRA vao model goc roi luu nguyen ban -> rerank.py dung duoc ngay
-    log.info('Gop LoRA vao trong so goc ...')
-    merge_and_strip(model.model)
+    # Gop LoRA vao model goc roi luu nguyen ban -> rerank.py dung duoc ngay.
+    if not args.full:
+        log.info('Gop LoRA vao trong so goc ...')
+        merge_and_strip(model.model)
     os.makedirs(args.out, exist_ok=True)
     model.save_pretrained(args.out)
     log.info(f'Da luu: {args.out}')
