@@ -168,7 +168,24 @@ def parse_args():
                         help='Maximum candidate chunks per document')
     parser.add_argument('--batch', type=int, default=16,
                         help='Optional reranker batch size')
+    parser.add_argument('--device', default=None,
+                        help="Compute device: 'cuda', 'mps', or 'cpu'. Defaults to auto-detect.")
     return parser.parse_args()
+
+
+def get_device(requested=None):
+    if requested and requested != 'auto':
+        return requested
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return 'cuda'
+        if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+            return 'mps'
+    except ImportError:
+        pass
+    return 'cpu'
+
 
 
 def bm25_chunk_scores(bm25, query, pool):
@@ -208,13 +225,15 @@ def main():
             f'Task 2 index not found: {args.index}\n'
             'Build index_qa from QA/selected-contexts before prediction.')
 
+    device = get_device(args.device)
+
     if args.retriever == 'hybrid':
         if not os.path.isdir(args.emb):
             raise SystemExit(
                 f'Task 2 embeddings not found: {args.emb}\n'
                 'Build emb_qa_v2 from QA chunks, or use --retriever bm25.')
         from hybrid import Hybrid
-        retriever = Hybrid(args.index, args.emb, k1=args.k1, b=args.b)
+        retriever = Hybrid(args.index, args.emb, k1=args.k1, b=args.b, device=device)
         bm25 = retriever.bm25
         texts = [question for _, question in questions]
         query_vectors = np.concatenate([
@@ -230,10 +249,10 @@ def main():
     reranker = None
     if args.reranker:
         from rerank import Reranker
-        reranker = Reranker(args.reranker, batch=args.batch)
+        reranker = Reranker(args.reranker, batch=args.batch, device=device)
 
     print(f'{len(questions)} questions | retriever={args.retriever} | '
-          f'reranker={args.reranker or "none"} | '
+          f'reranker={args.reranker or "none"} | device={device} | '
           f'ndocs={args.ndocs} mchunks={args.mchunks}')
 
     predictions, candidates_by_question = {}, {}

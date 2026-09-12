@@ -54,6 +54,14 @@ def parse_args():
     parser.add_argument('--gpu-memory-utilization', type=float, default=0.85)
     parser.add_argument('--temperature', type=float, default=0.0)
     parser.add_argument('--fallback-min-chars', type=int, default=80)
+    parser.add_argument('--min-coverage', type=float, default=0.85,
+                        help='Minimum extractive token coverage ratio against source')
+    parser.add_argument('--max-conclusion-chars', type=int, default=300,
+                        help='Maximum character length for conclusion sentence')
+    parser.add_argument('--backend', default='auto', choices=['auto', 'vllm', 'hf'],
+                        help='vllm (fast, GPU only), hf (transformers, supports Apple Silicon MPS/CPU), or auto')
+    parser.add_argument('--device', default='auto',
+                        help="Compute device for local execution: 'auto', 'cuda', 'mps', or 'cpu'")
     parser.add_argument('--mode', default='conclusion',
                         choices=['conclusion', 'rewrite'])
     return parser.parse_args()
@@ -83,20 +91,75 @@ def clean_answer(text):
     return text
 
 
-def valid_conclusion(conclusion, row):
-    """Reject unsupported numbers and malformed/overlong conclusions."""
+TOKEN_RE = re.compile(r'\w+', re.UNICODE)
+VI_STOPWORDS = {
+    'theo', 'đó', 'thì', 'là', 'và', 'của', 'các', 'những', 'cho', 'được',
+    'có', 'sẽ', 'phải', 'để', 'với', 'trong', 'khi', 'nếu', 'bị', 'do',
+    'tại', 'như', 'về', 'này', 'trên', 'hoặc', 'hay', 'ra', 'vào', 'lại'
+}
+
+
+def valid_conclusion(conclusion, row, min_coverage=0.85, max_chars=300):
+    """Reject unsupported numbers, hallucinations, and non-extractive conclusions."""
     if not conclusion.startswith('Theo đó,'):
         return False
-    if not 20 <= len(conclusion) <= 600:
+    if not 20 <= len(conclusion) <= max_chars:
         return False
     lowered = conclusion.lower()
     if any(marker in lowered for marker in (
             'không đủ thông tin', 'không có đủ thông tin', 'tôi không thể')):
         return False
+
     source = f'{row["question"]}\n{row["rule_answer"]}'
     source_numbers = set(re.findall(r'\d[\d./-]*', source))
     generated_numbers = set(re.findall(r'\d[\d./-]*', conclusion))
-    return generated_numbers.issubset(source_numbers)
+    if not generated_numbers.issubset(source_numbers):
+        return False
+
+    source_tokens = set(TOKEN_RE.findall(source.lower()))
+    gen_tokens = TOKEN_RE.findall(lowered)
+    content_tokens = [t for t in gen_tokens if len(t) >= 2 and t not in VI_STOPWORDS]
+    if not content_tokens:
+        return False
+
+    covered = sum(1 for t in content_tokens if t in source_tokens)
+    coverage = covered / len(content_tokens)
+    return coverage >= min_coverage
+
+
+def generate_hf(prompts, model_name, device, max_tokens, temperature):
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    print(f'Loading HuggingFace model on {device}: {model_name}', flush=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    dtype = torch.bfloat16 if device == 'cuda' else (torch.float16 if device == 'mps' else torch.float32)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=dtype,
+        trust_remote_code=True,
+    ).to(device)
+    model.eval()
+
+    outputs = []
+    print(f'Generating {len(prompts)} answers via HuggingFace ({device}) ...', flush=True)
+    for i, prompt in enumerate(prompts):
+        inputs = tokenizer(prompt, return_tensors='pt').to(device)
+        with torch.no_grad():
+            gen_kwargs = {
+                'max_new_tokens': max_tokens,
+                'do_sample': temperature > 0.0,
+                'pad_token_id': tokenizer.eos_token_id,
+            }
+            if temperature > 0.0:
+                gen_kwargs['temperature'] = temperature
+            output_ids = model.generate(**inputs, **gen_kwargs)
+        new_ids = output_ids[0][inputs['input_ids'].shape[1]:]
+        text = tokenizer.decode(new_ids, skip_special_tokens=True)
+        outputs.append(text)
+        if (i + 1) % 20 == 0 or (i + 1) == len(prompts):
+            print(f'  Generated {i + 1}/{len(prompts)}', flush=True)
+    return outputs
 
 
 def write_submission(prefix, predictions):
@@ -117,49 +180,96 @@ def main():
     if not data:
         raise SystemExit('Candidate file is empty.')
 
-    from vllm import LLM, SamplingParams
+    device = args.device
+    if device == 'auto':
+        try:
+            import torch
+            if torch.cuda.is_available():
+                device = 'cuda'
+            elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                device = 'mps'
+            else:
+                device = 'cpu'
+        except ImportError:
+            device = 'cpu'
 
-    print(f'Loading vLLM model: {args.model}', flush=True)
-    llm = LLM(
-        model=args.model,
-        dtype='bfloat16',
-        max_model_len=args.max_model_len,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        trust_remote_code=True,
-        enable_prefix_caching=True,
-    )
-    tokenizer = llm.get_tokenizer()
+    backend = args.backend
+    if backend == 'auto':
+        try:
+            import vllm
+            import torch
+            backend = 'vllm' if torch.cuda.is_available() else 'hf'
+        except ImportError:
+            backend = 'hf'
+
     keys = list(data)
-    prompts = []
-    for key in keys:
-        messages = [
+    message_list = [
+        [
             {'role': 'system', 'content': (CONCLUSION_SYSTEM_PROMPT
                                           if args.mode == 'conclusion'
                                           else REWRITE_SYSTEM_PROMPT)},
             {'role': 'user', 'content': build_user_prompt(data[key], args.mode)},
         ]
-        prompts.append(tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True,
-            enable_thinking=False))
+        for key in keys
+    ]
 
-    sampling = SamplingParams(
-        temperature=args.temperature,
-        top_p=1.0,
-        max_tokens=args.max_tokens,
-        repetition_penalty=1.03,
-    )
-    print(f'Generating {len(prompts)} answers ...', flush=True)
-    outputs = llm.generate(prompts, sampling, use_tqdm=True)
+    if backend == 'vllm':
+        from vllm import LLM, SamplingParams
+
+        print(f'Loading vLLM model: {args.model}', flush=True)
+        llm = LLM(
+            model=args.model,
+            dtype='bfloat16',
+            max_model_len=args.max_model_len,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+            trust_remote_code=True,
+            enable_prefix_caching=True,
+        )
+        tokenizer = llm.get_tokenizer()
+        prompts = []
+        for messages in message_list:
+            try:
+                prompts.append(tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True,
+                    enable_thinking=False))
+            except TypeError:
+                prompts.append(tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True))
+
+        sampling = SamplingParams(
+            temperature=args.temperature,
+            top_p=1.0,
+            max_tokens=args.max_tokens,
+            repetition_penalty=1.03,
+        )
+        print(f'Generating {len(prompts)} answers via vLLM ...', flush=True)
+        vllm_outputs = llm.generate(prompts, sampling, use_tqdm=True)
+        raw_outputs = [out.outputs[0].text for out in vllm_outputs]
+    else:
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+        prompts = []
+        for messages in message_list:
+            try:
+                prompts.append(tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True,
+                    enable_thinking=False))
+            except TypeError:
+                prompts.append(tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True))
+        raw_outputs = generate_hf(prompts, args.model, device, args.max_tokens, args.temperature)
 
     predictions = {}
     fallback_count = 0
-    for key, output in zip(keys, outputs):
-        generated = clean_answer(output.outputs[0].text)
+    for key, output_text in zip(keys, raw_outputs):
+        generated = clean_answer(output_text)
         if args.mode == 'conclusion':
             # A newline usually indicates the model ignored the one-sentence rule.
             conclusion = next((line.strip() for line in generated.splitlines()
                                if line.strip()), '')
-            if valid_conclusion(conclusion, data[key]):
+            if valid_conclusion(conclusion, data[key],
+                                min_coverage=args.min_coverage,
+                                max_chars=args.max_conclusion_chars):
                 answer = data[key]['rule_answer'].rstrip() + '\n' + conclusion
             else:
                 answer = data[key]['rule_answer']
