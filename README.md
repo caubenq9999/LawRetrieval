@@ -187,10 +187,15 @@ Retrieval-LegalIR/
   rerank.py                         cross-encoder (tuỳ chọn, xem bên dưới)
   serve.py                          giao diện web tra cứu
   eval_bm25.py, sweep_bm25.py       script đo
+DocumentReranker-LegalIR/           thử nghiệm LambdaMART ở mức văn bản; xem README riêng
 Validator-Task-LegalIR/
   validate_submission.py            kiểm tra bài nộp, 14 mã lỗi
 RESULTS.md                          toàn bộ số liệu đã đo, kèm cỡ mẫu
 ```
+
+`DocumentReranker-LegalIR/` là pipeline thử nghiệm tách biệt, chưa phải default. Nó dùng
+lại top-50 ứng viên và điểm cross-encoder, rồi học xếp hạng ở mức văn bản. Xem
+[`DocumentReranker-LegalIR/README.md`](DocumentReranker-LegalIR/README.md) trước khi chạy.
 
 ### Dùng lẻ từng phần
 

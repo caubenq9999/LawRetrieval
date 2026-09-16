@@ -1,0 +1,36 @@
+{
+  "paths": {
+    "train_questions": "LegalIR - Public Test/train.json",
+    "public_questions": "LegalIR - Public Test/public-official.json",
+    "split": "Finetune-LegalIR/data/split.json",
+    "index": "Retrieval-LegalIR/index",
+    "emb": "Retrieval-LegalIR/emb_v2ft",
+    "reranker": "Finetune-LegalIR/models/reranker-ft",
+    "artifacts": "DocumentReranker-LegalIR/artifacts"
+  },
+  "retrieval": {
+    "pool": 2000,
+    "alpha": 0.7,
+    "beta": 0.5,
+    "agg": "max+0.4",
+    "prior_lambda": 0.2,
+    "ndocs": 50,
+    "mchunks": 2,
+    "k1": 2.5,
+    "b": 0.9,
+    "batch": 16,
+    "max_length": 512,
+    "encode_batch": 64
+  },
+  "training": {
+    "trees": 1000,
+    "learning_rate": 0.03,
+    "num_leaves": 15,
+    "min_data_in_leaf": 30,
+    "feature_fraction": 0.9,
+    "bagging_fraction": 0.9,
+    "early_stopping": 80,
+    "seed": 2026
+  }
+}
+

@@ -40,9 +40,11 @@ MAX_LEN = 512
 
 
 class Reranker:
-    def __init__(self, model_id=DEFAULT_MODEL, device=None, batch=16):
+    def __init__(self, model_id=DEFAULT_MODEL, device=None, batch=16,
+                 max_length=MAX_LEN):
         self.dev = device or ('cuda' if torch.cuda.is_available() else 'cpu')
         self.batch = batch
+        self.max_length = max_length
         try:
             self.tok = AutoTokenizer.from_pretrained(model_id)
         except Exception:
@@ -63,7 +65,7 @@ class Reranker:
         for s in range(0, len(texts), self.batch):
             part = texts[s:s + self.batch]
             enc = self.tok([query] * len(part), part, padding=True, truncation=True,
-                           max_length=MAX_LEN, return_tensors='pt').to(self.dev)
+                           max_length=self.max_length, return_tensors='pt').to(self.dev)
             with torch.no_grad():
                 logits = self.model(**enc).logits
             out[s:s + len(part)] = logits[:, 0].float().cpu().numpy()

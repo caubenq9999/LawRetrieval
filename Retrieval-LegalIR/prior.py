@@ -55,9 +55,9 @@ def _pick_reranker():
 
 RERANKER = _pick_reranker()
 
-# Cau hinh tot nhat hien tai (Finetune-LegalIR/logs/rr_beta_ft.log: val 0.9330)
-CFG = dict(k1=2.5, b=0.9, pool=2000, alpha=0.7, agg='top3',
-           ndocs=50, mchunks=2, beta=0.7)
+# Cau hinh full pipeline da xac nhan trong RUNNING.md muc 5/8 (public 0.9456).
+CFG = dict(k1=2.5, b=0.9, pool=2000, alpha=0.7, agg='max+0.4',
+           ndocs=50, mchunks=2, beta=0.5)
 NCAND = 50          # so ung vien luu lai de con cho prior xep lai
 TOPK = 5
 
