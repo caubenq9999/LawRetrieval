@@ -57,6 +57,11 @@ class Hybrid:
         # nam o hai khong gian vector khac nhau. Truoc day cho cung MODEL_ID nen khi
         # doi sang emb_ft (sinh boi halong-ft) thi cau hoi van dung model goc.
         self.qmodel = qmodel or self.emeta.get('model') or MODEL_ID
+        if ('/' in self.qmodel or '\\' in self.qmodel) and not os.path.exists(self.qmodel):
+            base_name = os.path.basename(os.path.normpath(self.qmodel))
+            alt = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'Finetune-LegalIR', 'models', base_name)
+            if os.path.exists(alt):
+                self.qmodel = os.path.abspath(alt)
         # Cau hoi phai gop token y het cach da gop cho van ban, neu khong hai ben
         # lech khong gian. emb/meta.json ghi lai cach gop luc encode.
         self.pooling = self.emeta.get('pooling', 'mean')
