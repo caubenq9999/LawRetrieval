@@ -35,10 +35,24 @@ import numpy as np
 
 BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..',
                     'LegalIR - Public Test-20260806T081424Z-1-001', 'LegalIR - Public Test')
-TRAIN = os.path.join(BASE, 'train.json')
+
+def _find_train():
+    candidates = [
+        os.path.join(BASE, 'train.json'),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'LegalIR - Public Test', 'train.json'),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'train.json'),
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return os.path.abspath(c)
+    return os.path.join(BASE, 'train.json')
+
+TRAIN = _find_train()
 PUBLIC = os.path.join(BASE, 'public-official.json')
 SPLIT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..',
                      'Finetune-LegalIR', 'data', 'split.json')
+
+
 def _pick_reranker():
     """Uu tien ban fp16 (nap nhanh hon, doc 1.14 GB thay vi 2.27 GB), khong co
     thi dung ban goc do train_ce.py sinh ra.
@@ -223,7 +237,8 @@ def cmd_sweep(args):
 def cmd_submit(args):
     d = load_json(args.cands)
     cands = d['cands']
-    train = load_json(TRAIN)
+    train_path = getattr(args, 'train', None) or TRAIN
+    train = load_json(train_path)
 
     # Bai nop that: dem tren CA 7000 cau train. Public test roi nhau voi train
     # nen khong co ro ri, va nhieu du lieu hon thi tan suat it nhieu hon.
@@ -304,6 +319,7 @@ def main():
     b.add_argument('--cands', '-c', required=True)
     b.add_argument('--lam', type=float, required=True)
     b.add_argument('--out', '-o', default='submission_prior')
+    b.add_argument('--train', default=None, help='Duong dan train.json de dem tan suat')
     b.set_defaults(fn=cmd_submit)
 
     args = p.parse_args()
