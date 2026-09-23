@@ -136,8 +136,17 @@ def main():
     p.add_argument('--rank', type=int, default=16)
     p.add_argument('--listwise', action='store_true',
                    help='Dung CachedMultipleNegativesRankingLoss thay vi BCE')
+    p.add_argument('--seed', type=int, default=42,
+                   help='Random seed. Doi seed de train nhieu checkpoint cho ensemble.')
     p.add_argument('--smoke', action='store_true')
     args = p.parse_args()
+
+    # Set seed for reproducibility and ensemble diversity
+    import random
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     setup_logging(args.log)
     log.info('=' * 68)

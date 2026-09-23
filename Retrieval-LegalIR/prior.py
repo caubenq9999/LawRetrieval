@@ -96,7 +96,7 @@ def apply_prior(cand, w, lam, topk=TOPK):
 
 def cmd_dump(args):
     from hybrid import Hybrid
-    from rerank import Reranker, rerank_docs
+    from rerank import Reranker, EnsembleReranker, rerank_docs
 
     if args.questions == 'val':
         train = load_json(TRAIN)
@@ -110,12 +110,22 @@ def cmd_dump(args):
     # Nap cross-encoder TRUOC: checkpoint 2.17 GB can map tron mot lan, phai gianh
     # duoc lo commit lien tuc luc con rong nhat. Nap bi-encoder truoc thi den luot
     # no chi con manh vun -> "paging file too small".
-    rr = Reranker(args.reranker, batch=16)
+    reranker_paths = [p.strip() for p in args.reranker.split(',') if p.strip()]
+    if len(reranker_paths) > 1:
+        rr = EnsembleReranker(reranker_paths, batch=args.batch)
+    else:
+        rr = Reranker(reranker_paths[0], batch=args.batch)
     CFG['alpha'], CFG['beta'], CFG['agg'] = args.alpha, args.beta, args.agg
+    if hasattr(args, 'pool') and args.pool:
+        CFG['pool'] = args.pool
+    if hasattr(args, 'ndocs') and args.ndocs:
+        CFG['ndocs'] = args.ndocs
+    if hasattr(args, 'mchunks') and args.mchunks:
+        CFG['mchunks'] = args.mchunks
     h = Hybrid(args.index, args.emb, k1=CFG['k1'], b=CFG['b'])
     print(f'BM25   : k1={CFG["k1"]} b={CFG["b"]} | pool {CFG["pool"]}')
     print(f'Dense  : {args.emb} alpha={CFG["alpha"]}')
-    print(f'CE     : {args.reranker} beta={CFG["beta"]} '
+    print(f'CE     : {rr.model_id} beta={CFG["beta"]} '
           f'| {CFG["ndocs"]} van ban x {CFG["mchunks"]} chunk')
 
     qids = list(questions)
@@ -263,7 +273,11 @@ def main():
     d.add_argument('--out', '-o', required=True)
     d.add_argument('--index', default='index')
     d.add_argument('--emb', default='emb_ft')
-    d.add_argument('--reranker', default=RERANKER)
+    d.add_argument('--reranker', default=RERANKER,
+                   help='Duong dan den cross-encoder. Truyen nhieu duong dan ngan '
+                        'bang dau phay de dung ensemble: path1,path2')
+    d.add_argument('--batch', type=int, default=16,
+                   help='Batch size cho cross-encoder. Tang len tren A100.')
     d.add_argument('--limit', type=int, default=0, help='Chi chay N cau dau - de thu nhanh')
     d.add_argument('--alpha', type=float, default=CFG['alpha'])
     d.add_argument('--agg', default=CFG['agg'],
@@ -272,6 +286,12 @@ def main():
     d.add_argument('--beta', type=float, default=CFG['beta'],
                    help='Trong so cross-encoder. Quet lai moi khi doi model dense: '
                         'dense manh hon thi beta toi uu giam xuong.')
+    d.add_argument('--pool', type=int, default=0,
+                   help='BM25 pool size. 0 = dung default tu CFG.')
+    d.add_argument('--ndocs', type=int, default=0,
+                   help='So van ban dua vao cross-encoder. 0 = dung default.')
+    d.add_argument('--mchunks', type=int, default=0,
+                   help='So chunk moi van ban dua vao CE. 0 = dung default.')
     d.set_defaults(fn=cmd_dump)
 
     s = sub.add_parser('sweep', help='Quet lam tren validation')
