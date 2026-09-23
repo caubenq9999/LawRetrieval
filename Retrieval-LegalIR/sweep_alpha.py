@@ -285,10 +285,10 @@ def main():
     c.add_argument('-d', '--dump', required=True)
     c.add_argument('-s', '--scores', required=True)
     c.add_argument('--alphas', type=float, nargs='+', default=ALPHAS)
-    c.add_argument('--betas', type=float, nargs='+', default=[0.7],
+    c.add_argument('--betas', type=float, nargs='+', default=[0.5],
                    help='Truyen nhieu gia tri de quet luoi alpha x beta')
     c.add_argument('--lams', type=float, nargs='+', default=[0.2])
-    c.add_argument('--ref', type=float, nargs=3, default=[0.7, 0.7, 0.2],
+    c.add_argument('--ref', type=float, nargs=3, default=[0.7, 0.5, 0.2],
                    metavar=('A', 'B', 'L'), help='Cau hinh moc de so delta')
     c.set_defaults(fn=cmd_sweep)
 

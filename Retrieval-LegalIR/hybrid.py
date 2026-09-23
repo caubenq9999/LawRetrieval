@@ -116,9 +116,12 @@ class Hybrid:
 
     @staticmethod
     def _agg_score(vals, agg):
-        """max | topN (trung binh N chunk cao nhat). vals da sap giam dan."""
+        """max | topN | max+W (trung binh N chunk cao nhat). vals da sap giam dan."""
+        agg = agg.replace(' ', '')
         if agg == 'max':
             return vals[0]
+        if agg.startswith('max+'):
+            return vals[0] + float(agg[4:]) * (vals[1] if len(vals) > 1 else 0.0)
         if agg.startswith('top') and agg[3:].isdigit():
             return float(np.mean(vals[:int(agg[3:])]))
         raise ValueError(f'agg khong hop le: {agg}')

@@ -82,12 +82,14 @@ def _agg(v, agg):
     tin hieu do, con van ban sai co hai doan deu deu lai noi len. Do tren 500 cau
     validation sach: max+0.4 cho 0.9377 so voi 0.9277 cua top2.
     """
+    agg = agg.replace(' ', '')   # chong loi 'max + 0.4' bi fallback am tham
     if agg == 'max':
         return v[0]
     if agg.startswith('max+'):
         return v[0] + float(agg[4:]) * (v[1] if len(v) > 1 else 0.0)
-    n = int(agg[3:]) if agg.startswith('top') and agg[3:].isdigit() else 3
-    return float(np.mean(v[:n]))
+    if agg.startswith('top') and agg[3:].isdigit():
+        return float(np.mean(v[:int(agg[3:])]))
+    raise ValueError(f"agg khong hop le: '{agg}'. Dung 'max', 'topN', hoac 'max+W'.")
 
 
 def rerank_docs(h, rr, query, topk=5, pool=1000, alpha=0.7, agg='top3',
